@@ -12,10 +12,12 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * - Gerenciamento e sincronização atômica de certificados mTLS com verificação MD5.
  * - Suporte automático a Sandbox (stage.cora.com.br) e Produção (api.cora.com.br).
  * - Autenticação OAuth2 Client Credentials com cache de token.
- * - Emissão de Pix Imediato Bacen (PUT /v1/cob/{txid}).
- * - Emissão de Boleto Bancário Híbrido com Pix (POST /v2/invoices) e régua de cobrança/WhatsApp.
+ * - Emissão de Pix Imediato Bacen (PUT /v1/cob/{txid}) com valor decimal em string.
+ * - Emissão de Boleto Bancário Híbrido com Pix (POST /v2/invoices), valor em centavos (int),
+ *   documento aninhado e telefone internacional higienizado para WhatsApp.
  * - Consulta ativa anti-fraude para Pix e Boletos (dupla checagem mTLS).
- * - Diagnóstico em tempo real de certificados OpenSSL (validade, emissor e integridade de chave).
+ * - Compartilhamento inteligente de credenciais em cascata entre gateways.
+ * - Diagnóstico em tempo real de certificados OpenSSL.
  */
 class Cora_api
 {
@@ -46,36 +48,54 @@ class Cora_api
     }
 
     /**
-     * Recupera uma configuração buscando prioritariamente no gateway específico,
-     * fazendo fallback para o outro gateway ou para as opções globais do módulo.
+     * 4. Compartilhamento Inteligente de Credenciais mTLS
+     * Recupera a credencial em cascata com suporte a prefixos 'payment_gateway_' e 'paymentmethod_'
+     * Se vazio no Pix, busca automaticamente no Boleto (ou vice-versa), eliminando digitação duplicada.
      *
-     * @param string $key Chave da configuração (ex: 'client_id', 'sandbox', 'cert_content')
+     * @param string $key Chave da configuração (ex: 'client_id', 'sandbox', 'cert_content', 'key_content')
      * @param string $preferredGateway 'cora_pix' ou 'cora_boleto'
-     * @return mixed
+     * @return string
+     */
+    public function get_credential($key, $preferredGateway = 'cora_pix')
+    {
+        $altGateway = ($preferredGateway === 'cora_pix') ? 'cora_boleto' : 'cora_pix';
+        $prefixes   = ['payment_gateway_', 'paymentmethod_'];
+
+        // 1. Tenta obter no gateway preferencial
+        foreach ($prefixes as $pfx) {
+            $val = get_option($pfx . $preferredGateway . '_' . $key);
+            if (!empty($val)) {
+                return trim($val);
+            }
+        }
+
+        // 2. Fallback inteligente: Busca na aba do outro gateway
+        foreach ($prefixes as $pfx) {
+            $val = get_option($pfx . $altGateway . '_' . $key);
+            if (!empty($val)) {
+                return trim($val);
+            }
+        }
+
+        // 3. Fallback para opções globais do módulo
+        $valGlobal = get_option('cora_payments_' . $key);
+        if (!empty($valGlobal)) {
+            return trim($valGlobal);
+        }
+
+        return '';
+    }
+
+    /**
+     * Alias de compatibilidade para get_credential
+     *
+     * @param string $key
+     * @param string $preferredGateway
+     * @return string
      */
     public function get_setting($key, $preferredGateway = 'cora_pix')
     {
-        $altGateway = ($preferredGateway === 'cora_pix') ? 'cora_boleto' : 'cora_pix';
-
-        // 1. Tenta gateway preferencial
-        $val = get_option('paymentmethod_' . $preferredGateway . '_' . $key);
-        if ($val !== '' && $val !== false && $val !== null) {
-            return $val;
-        }
-
-        // 2. Tenta gateway alternativo (compartilhamento de credenciais)
-        $valAlt = get_option('paymentmethod_' . $altGateway . '_' . $key);
-        if ($valAlt !== '' && $valAlt !== false && $valAlt !== null) {
-            return $valAlt;
-        }
-
-        // 3. Tenta opção global do módulo
-        $valGlobal = get_option('cora_payments_' . $key);
-        if ($valGlobal !== '' && $valGlobal !== false && $valGlobal !== null) {
-            return $valGlobal;
-        }
-
-        return null;
+        return $this->get_credential($key, $preferredGateway);
     }
 
     /**
@@ -86,7 +106,7 @@ class Cora_api
      */
     public function get_base_url($gateway = 'cora_pix')
     {
-        $is_sandbox = (bool)$this->get_setting('sandbox', $gateway);
+        $is_sandbox = (bool)$this->get_credential('sandbox', $gateway);
         return $is_sandbox ? self::STAGE_BASE_URL : self::PROD_BASE_URL;
     }
 
@@ -121,8 +141,8 @@ class Cora_api
         $certFile = $certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem';
         $keyFile  = $certsDir . DIRECTORY_SEPARATOR . 'cora_key.key';
 
-        $certContent = trim($this->get_setting('cert_content', $gateway) ?? '');
-        $keyContent  = trim($this->get_setting('key_content', $gateway) ?? '');
+        $certContent = trim($this->get_credential('cert_content', $gateway));
+        $keyContent  = trim($this->get_credential('key_content', $gateway));
 
         // Suporte à descriptografia caso Perfex tenha armazenado encriptado
         if (isset($this->ci->encryption)) {
@@ -171,8 +191,8 @@ class Cora_api
      */
     public function diagnosticar_certificados($gateway = 'cora_pix')
     {
-        $certRaw = trim($this->get_setting('cert_content', $gateway) ?? '');
-        $keyRaw  = trim($this->get_setting('key_content', $gateway) ?? '');
+        $certRaw = trim($this->get_credential('cert_content', $gateway));
+        $keyRaw  = trim($this->get_credential('key_content', $gateway));
 
         $result = [
             'cert_valido'   => false,
@@ -254,7 +274,7 @@ class Cora_api
         }
 
         // 2. Verifica cache em banco de dados
-        $cacheKey = 'cora_oauth_token_' . md5($this->get_base_url($gateway) . $this->get_setting('client_id', $gateway));
+        $cacheKey = 'cora_oauth_token_' . md5($this->get_base_url($gateway) . $this->get_credential('client_id', $gateway));
         if (!$forceRefresh) {
             $cached = get_option($cacheKey);
             if (!empty($cached)) {
@@ -268,12 +288,12 @@ class Cora_api
         }
 
         // 3. Solicita novo token via mTLS
-        $clientId = trim($this->get_setting('client_id', $gateway) ?? '');
+        $clientId = trim($this->get_credential('client_id', $gateway));
         if (empty($clientId)) {
             throw new Exception('Client ID da Cora não configurado. Acesse as configurações do módulo para informar.');
         }
 
-        $certs = $this->get_cert_paths($gateway);
+        $certs    = $this->get_cert_paths($gateway);
         $tokenUrl = $this->get_base_url($gateway) . '/token';
 
         $postFields = http_build_query([
@@ -333,7 +353,9 @@ class Cora_api
     }
 
     /**
-     * Emissão de Pix Imediato (PUT /v1/cob/{txid})
+     * 1. Emissão de Pix Imediato (PUT /v1/cob/{txid})
+     * Padrão Bacen: Valor enviado como string decimal com ponto ("150.50")
+     * e chaves diretas ['devedor']['cpf'] ou ['devedor']['cnpj'].
      *
      * @param object $invoice Objeto fatura Perfex
      * @param float $amount Valor da transação
@@ -343,7 +365,7 @@ class Cora_api
      */
     public function criar_pix($invoice, $amount, $txid = null)
     {
-        $chavePix = trim($this->get_setting('chave_pix', 'cora_pix') ?? '');
+        $chavePix = trim($this->get_credential('chave_pix', 'cora_pix'));
         if (empty($chavePix)) {
             throw new Exception('Chave Pix não configurada nas configurações do gateway.');
         }
@@ -372,9 +394,10 @@ class Cora_api
             $clientName = 'Cliente Fatura #' . $invoice->id;
         }
 
-        $expMinutes = (int)($this->get_setting('expiration_minutes', 'cora_pix') ?: 1440);
+        $expMinutes = (int)($this->get_credential('expiration_minutes', 'cora_pix') ?: 1440);
         $expSeconds = $expMinutes * 60;
 
+        // Padrão Bacen Pix: valor como string decimal com ponto: "150.50"
         $payload = [
             'calendario' => [
                 'expiracao' => $expSeconds,
@@ -389,7 +412,8 @@ class Cora_api
             'solicitacaoPagador' => 'Fatura #' . format_invoice_number($invoice->id),
         ];
 
-        if (strlen($doc) === 14) {
+        // Padrão Bacen: chaves diretas ['devedor']['cpf'] ou ['devedor']['cnpj']
+        if (strlen($doc) > 11) {
             $payload['devedor']['cnpj'] = $doc;
         } else {
             $payload['devedor']['cpf'] = $doc;
@@ -452,10 +476,13 @@ class Cora_api
     }
 
     /**
-     * Emissão de Boleto Bancário Híbrido com Pix (POST /v2/invoices)
+     * 1 & 2. Emissão de Boleto Bancário Híbrido com Pix (POST /v2/invoices)
      * 
-     * Monta payload completo com customer, telefone com DDD para acionamento
-     * da régua de cobrança/WhatsApp da Cora, multa, juros e opções BANK_SLIP + PIX.
+     * Padrão Cora v2:
+     * - Valor em centavos como número inteiro: (int) round($amount * 100)
+     * - Documento aninhado: ['identity' => $doc, 'type' => 'CPF'|'CNPJ']
+     * - Telefone higienizado com DDI 55 nacional para acionamento da régua de WhatsApp da Cora:
+     *   'phone' => '5561999998888'
      *
      * @param object $invoice Objeto fatura Perfex
      * @param float $amount Valor da cobrança
@@ -502,26 +529,26 @@ class Cora_api
             $clientEmail = 'financeiro@' . (!empty($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'cora.com.br');
         }
 
-        // Telefone higienizado com DDD para régua de cobrança / WhatsApp
-        $rawPhone = $invoice->client->phonenumber ?? '';
-        if (empty($rawPhone) && isset($primaryContact) && !empty($primaryContact->phonenumber)) {
-            $rawPhone = $primaryContact->phonenumber;
+        // 2. Telefone higienizado para a Régua do WhatsApp da Cora
+        $phone = preg_replace('/\D/', '', $invoice->client->phonenumber ?? '');
+        if (empty($phone) && isset($primaryContact) && !empty($primaryContact->phonenumber)) {
+            $phone = preg_replace('/\D/', '', $primaryContact->phonenumber);
         }
-        $cleanPhone = $this->sanitizar_telefone($rawPhone);
+        // Se não tiver DDI 55, inclui automaticamente
+        if (!empty($phone) && strlen($phone) >= 10 && substr($phone, 0, 2) !== '55') {
+            $phone = '55' . $phone;
+        }
 
-        // Monta o objeto Customer
+        // 1. Objeto Customer: documento aninhado com identity e type
         $customerObj = [
             'name'     => mb_substr($clientName, 0, 150, 'UTF-8'),
             'email'    => $clientEmail,
             'document' => [
                 'identity' => $doc,
-                'type'     => (strlen($doc) === 14) ? 'CNPJ' : 'CPF',
+                'type'     => (strlen($doc) > 11) ? 'CNPJ' : 'CPF',
             ],
+            'phone'    => !empty($phone) ? $phone : null,
         ];
-
-        if (!empty($cleanPhone)) {
-            $customerObj['phone_number'] = $cleanPhone;
-        }
 
         // Endereço do cliente (se disponível)
         $address = $this->montar_endereco_cliente($invoice);
@@ -531,7 +558,7 @@ class Cora_api
 
         // Data de Vencimento
         $dueDate = !empty($invoice->duedate) ? $invoice->duedate : date('Y-m-d', strtotime('+3 days'));
-        // Se a data de vencimento for anterior a hoje, ajusta para hoje para permitir emissão
+        // Se a data de vencimento for anterior a hoje, ajusta para hoje
         if (strtotime($dueDate) < strtotime(date('Y-m-d'))) {
             $dueDate = date('Y-m-d');
         }
@@ -542,7 +569,7 @@ class Cora_api
         ];
 
         // Multa por atraso (%)
-        $multaPercent = isset($customOptions['multa']) ? (float)$customOptions['multa'] : (float)$this->get_setting('multa_percentual', 'cora_boleto');
+        $multaPercent = isset($customOptions['multa']) ? (float)$customOptions['multa'] : (float)$this->get_credential('multa_percentual', 'cora_boleto');
         if ($multaPercent > 0) {
             $paymentTerms['fine'] = [
                 'rate' => round($multaPercent, 2),
@@ -550,7 +577,7 @@ class Cora_api
         }
 
         // Juros de mora ao mês (%)
-        $jurosPercent = isset($customOptions['juros']) ? (float)$customOptions['juros'] : (float)$this->get_setting('juros_mensal_percentual', 'cora_boleto');
+        $jurosPercent = isset($customOptions['juros']) ? (float)$customOptions['juros'] : (float)$this->get_credential('juros_mensal_percentual', 'cora_boleto');
         if ($jurosPercent > 0) {
             $paymentTerms['interest'] = [
                 'rate' => round($jurosPercent, 2),
@@ -560,9 +587,9 @@ class Cora_api
         // TxID único para identificação interna da cobrança
         $txid = 'BOL' . date('YmdHis') . strtoupper(substr(bin2hex(random_bytes(6)), 0, 10));
 
-        // Descrição e Valor em Centavos (Cora API v2 usa centavos)
-        $amountInCents = (int)round($amount * 100);
-        $serviceName = 'Fatura #' . format_invoice_number($invoice->id);
+        // 1. Valor em Centavos como número inteiro (Cora v2 exige int em centavos)
+        $amountInCents = (int) round($amount * 100);
+        $serviceName   = 'Fatura #' . format_invoice_number($invoice->id);
 
         $payload = [
             'code'            => $txid,
@@ -652,7 +679,7 @@ class Cora_api
     }
 
     /**
-     * 6. Dupla Checagem Ativa Anti-Fraude: Consulta cobrança Pix (GET /v1/cob/{txid})
+     * Dupla Checagem Ativa Anti-Fraude: Consulta cobrança Pix (GET /v1/cob/{txid})
      *
      * @param string $txid Identificador da cobrança Pix
      * @return array|false
@@ -747,33 +774,6 @@ class Cora_api
             log_activity('Anti-Fraude Cora Boleto: Exceção ao consultar fatura ' . $coraInvoiceId . ': ' . $e->getMessage());
             return false;
         }
-    }
-
-    /**
-     * Sanitiza telefone para o formato aceito pela Cora (+5511999999999 ou DDD + Número)
-     * permitindo acionamento correto de WhatsApp e régua de cobrança automática.
-     *
-     * @param string $phone
-     * @return string
-     */
-    public function sanitizar_telefone($phone)
-    {
-        $digits = preg_replace('/\D/', '', $phone);
-        if (empty($digits)) {
-            return '';
-        }
-
-        // Se já começa com DDI 55 e tem 12 ou 13 dígitos
-        if (substr($digits, 0, 2) === '55' && (strlen($digits) === 12 || strlen($digits) === 13)) {
-            return '+' . $digits;
-        }
-
-        // Se tem 10 dígitos (DDD + 8 dígitos) ou 11 dígitos (DDD + 9 dígitos)
-        if (strlen($digits) === 10 || strlen($digits) === 11) {
-            return '+55' . $digits;
-        }
-
-        return '+' . $digits;
     }
 
     /**

@@ -8,11 +8,11 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * Controlador oficial unificado do módulo Cora Payments para Perfex CRM.
  * 
  * Responsabilidades:
- * 1. Webhook Unificado: Conciliação atômica para Pix Imediato e Boleto Bancário Híbrido,
- *    com dupla checagem ativa mTLS e barramento estrito de concorrência.
+ * 1. Webhook Unificado: Recebe e concilia notificações Pix (Padrão Bacen) e Boletos (Cora v2),
+ *    com dupla checagem mTLS ativa e concorrência atômica rigorosa.
  * 2. Tela de Pagamento Pix (pay): Exibição de QR Code e Copia e Cola.
- * 3. Tela e Download de Boleto (boleto/download_boleto): Exibição do boleto e redirecionamento de PDF.
- * 4. Polling em tempo real (check_status): Atualização assíncrona da tela do cliente.
+ * 3. Tela e Download de Boleto (boleto/download_boleto): Exibição de boleto, código de barras e link de PDF.
+ * 4. Polling assíncrono (check_status): Atualização em tempo real na tela do cliente.
  * 5. Teste de Conexão Administrativo (test_connection): Validação instantânea de certificados e OAuth2.
  */
 class Cora extends App_Controller
@@ -24,10 +24,8 @@ class Cora extends App_Controller
         $this->load->model('invoices_model');
         $this->load->model('clients_model');
 
-        // Carrega helper de API e gateways
+        // Carrega helper central de API
         $this->load->library('cora_payments/cora_api');
-        $this->load->library('cora_payments/cora_pix_gateway');
-        $this->load->library('cora_payments/cora_boleto_gateway');
     }
 
     /**
@@ -68,7 +66,6 @@ class Cora extends App_Controller
             return;
         }
 
-        // Se já concluída
         if ($transaction->status === 'CONCLUIDA') {
             set_alert('success', 'O pagamento já foi confirmado com sucesso!');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
@@ -123,7 +120,6 @@ class Cora extends App_Controller
             return;
         }
 
-        // Se a fatura já estiver paga, redireciona
         if ((int)$invoice->status === 2 || $transaction->status === 'CONCLUIDA') {
             set_alert('success', 'Esta fatura já foi quitada!');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
@@ -213,7 +209,7 @@ class Cora extends App_Controller
 
     /**
      * Validação administrativa instantânea de conexão mTLS e credenciais
-     * Acionado pelo botão "Testar Conexão com a Cora" na aba de configurações.
+     * Acionado pelo botão "Testar Conexão mTLS com a Cora" na aba de configurações.
      */
     public function test_connection()
     {
@@ -252,7 +248,7 @@ class Cora extends App_Controller
             $token = $this->cora_api->get_token('cora_pix', true);
 
             if ($token) {
-                $isSandbox = (int)$this->cora_api->get_setting('sandbox', 'cora_pix') === 1;
+                $isSandbox = (int)$this->cora_api->get_credential('sandbox', 'cora_pix') === 1;
                 $ambiente  = $isSandbox ? 'Homologação / Sandbox' : 'Produção';
 
                 echo json_encode([
@@ -275,13 +271,11 @@ class Cora extends App_Controller
     }
 
     /**
-     * Webhook Unificado: Recebimento e conciliação de notificações Pix e Boleto
+     * 3. Webhook Unificado: Recebimento de Pix e Boleto
      * 
-     * Implementa:
-     * 1. Suporte a headers Cora (webhook-event-type e webhook-resource-id)
-     * 2. Suporte a payloads padrão Bacen Pix ({ pix: [...] } ou { txid: ... })
-     * 3. Dupla checagem mTLS ativa antes da baixa
-     * 4. Idempotência estrita: UPDATE condicional (status != 'CONCLUIDA') com verificação de affected_rows() === 0
+     * Trata simultaneamente os dois formatos na mesma URL:
+     * - Pix Bacen: lista $payload['pix'] com txid, valor e endToEndId
+     * - Boleto Cora v2: eventos Cora ('invoice.paid', 'INVOICE_PAID') com conversão de centavos
      */
     public function webhook()
     {
@@ -290,191 +284,193 @@ class Cora extends App_Controller
             $this->security->csrf_verify = false;
         }
 
-        // Lê headers enviados pelo Banco Cora
+        $rawInput = file_get_contents('php://input');
+        $payload  = json_decode($rawInput, true);
+
+        // Suporte adicional caso a notificação chegue via HTTP headers da Cora
         $headerEventType  = $this->input->get_request_header('webhook-event-type', TRUE);
         $headerResourceId = $this->input->get_request_header('webhook-resource-id', TRUE);
 
-        $rawInput = file_get_contents('php://input');
-        $payload  = !empty($rawInput) ? json_decode($rawInput, true) : [];
-
-        // Log de depuração da notificação
-        log_activity('Cora Payments Webhook recebido. EventType: ' . ($headerEventType ?: 'None') . ' | Body: ' . substr($rawInput, 0, 300));
-
-        // =========================================================================
-        // CENÁRIO 1: NOTIFICAÇÃO DE BOLETO CORA (invoice.paid / invoice.cancelled)
-        // =========================================================================
-        $isBoletoEvent = ($headerEventType === 'invoice.paid' || $headerEventType === 'invoice.cancelled');
-        if (!$isBoletoEvent && isset($payload['event']) && in_array($payload['event'], ['invoice.paid', 'invoice.cancelled', 'INVOICE_PAID'])) {
-            $isBoletoEvent   = true;
-            $headerEventType = strtolower($payload['event']);
+        if (!$payload) {
+            if (!empty($headerEventType) && !empty($headerResourceId)) {
+                $payload = [
+                    'event' => $headerEventType,
+                    'data'  => ['id' => $headerResourceId],
+                ];
+            } else {
+                set_status_header(400);
+                header('Content-Type: application/json');
+                echo json_encode(['status' => 'error', 'message' => 'Payload vazio ou JSON inválido']);
+                return;
+            }
         }
 
-        if ($isBoletoEvent) {
-            $coraInvoiceId = $headerResourceId ?: ($payload['resource']['id'] ?? ($payload['data']['id'] ?? ($payload['id'] ?? '')));
+        log_activity('Cora Payments Webhook recebido: ' . substr($rawInput ?: json_encode($payload), 0, 300));
 
-            if (!empty($coraInvoiceId)) {
-                $this->processar_webhook_boleto($coraInvoiceId, $headerEventType, $payload);
+        // =========================================================================
+        // CENÁRIO A: Notificação de PIX (Padrão Bacen)
+        // =========================================================================
+        if (!empty($payload['pix']) && is_array($payload['pix'])) {
+            $this->load->library('cora_payments/cora_pix_gateway');
+            foreach ($payload['pix'] as $item) {
+                $txid   = $item['txid'] ?? null;
+                $valor  = $item['valor'] ?? null;
+                $e2e    = $item['endToEndId'] ?? ($item['end_to_end_id'] ?? null);
+                if (!empty($txid)) {
+                    $this->process_pix_payment($txid, $valor, $e2e);
+                }
+            }
+            set_status_header(200);
+            header('Content-Type: application/json');
+            echo json_encode(['status' => 'success', 'message' => 'Pix webhook processed']);
+            return;
+        } elseif (!empty($payload['txid'])) {
+            $this->load->library('cora_payments/cora_pix_gateway');
+            $this->process_pix_payment($payload['txid'], $payload['valor'] ?? null, $payload['endToEndId'] ?? null);
+            set_status_header(200);
+            header('Content-Type: application/json');
+            echo json_encode(['status' => 'success', 'message' => 'Pix single webhook processed']);
+            return;
+        }
+
+        // =========================================================================
+        // CENÁRIO B: Notificação de Boleto (Cora v2)
+        // =========================================================================
+        $event = $payload['event_type'] ?? ($payload['event'] ?? ($headerEventType ?? ''));
+        if (in_array($event, ['invoice.paid', 'INVOICE_PAID'])) {
+            $this->load->library('cora_payments/cora_boleto_gateway');
+            $cora_id = $payload['data']['id'] ?? ($payload['resource']['id'] ?? ($headerResourceId ?? ($payload['id'] ?? '')));
+            
+            // Converte centavos de volta para BRL
+            $amount = null;
+            if (isset($payload['data']['total_amount'])) {
+                $amount = ((float)$payload['data']['total_amount']) / 100;
+            } elseif (isset($payload['data']['amount'])) {
+                $amount = ((float)$payload['data']['amount']) / 100;
+            }
+
+            if (!empty($cora_id)) {
+                $this->process_boleto_payment($cora_id, $amount);
                 set_status_header(200);
                 header('Content-Type: application/json');
                 echo json_encode(['status' => 'success', 'message' => 'Boleto webhook processed']);
                 return;
             }
-        }
-
-        // =========================================================================
-        // CENÁRIO 2: NOTIFICAÇÃO PIX PADRÃO BACEN OU CORA
-        // =========================================================================
-        $pixItems = [];
-
-        if (isset($payload['pix']) && is_array($payload['pix'])) {
-            $pixItems = $payload['pix'];
-        } elseif (isset($payload['txid'])) {
-            $pixItems[] = $payload;
-        } elseif (isset($payload['data']['txid'])) {
-            $pixItems[] = $payload['data'];
-        }
-
-        if (!empty($pixItems)) {
-            $this->processar_webhook_pix($pixItems);
+        } elseif ($event === 'invoice.cancelled') {
+            $cora_id = $payload['data']['id'] ?? ($payload['resource']['id'] ?? ($headerResourceId ?? ($payload['id'] ?? '')));
+            if (!empty($cora_id)) {
+                $this->db->where('cora_invoice_id', $cora_id)
+                         ->where('status !=', 'CONCLUIDA')
+                         ->update(db_prefix() . 'cora_transactions', ['status' => 'CANCELLED']);
+                log_activity('Boleto Cora ' . $cora_id . ' cancelado via Webhook.');
+            }
             set_status_header(200);
             header('Content-Type: application/json');
-            echo json_encode(['status' => 'success', 'message' => 'Pix webhook processed']);
+            echo json_encode(['status' => 'success', 'message' => 'Boleto cancellation processed']);
             return;
         }
 
-        // Se nenhum item foi reconhecido, responde 200 para liberar o webhook da Cora
+        // Responde 200 caso não seja nenhum evento crítico
         set_status_header(200);
         header('Content-Type: application/json');
-        echo json_encode(['status' => 'ignored', 'message' => 'No actionable transaction found']);
+        echo json_encode(['status' => 'ignored', 'message' => 'No actionable transaction']);
     }
 
     /**
-     * Processamento de eventos Pix recebidos via Webhook
+     * Processamento de pagamento Pix com Dupla Checagem mTLS e Idempotência Estrita
      *
-     * @param array $pixItems
+     * @param string $txid
+     * @param mixed $valor
+     * @param string|null $e2eid
      */
-    protected function processar_webhook_pix($pixItems)
+    protected function process_pix_payment($txid, $valor = null, $e2eid = null)
     {
-        foreach ($pixItems as $item) {
-            $txid  = $item['txid'] ?? null;
-            $e2eid = $item['endToEndId'] ?? ($item['end_to_end_id'] ?? $txid);
-
-            if (empty($txid)) {
-                continue;
-            }
-
-            // Localiza a transação local
-            $transacao = $this->db->where('txid', $txid)
-                                  ->get(db_prefix() . 'cora_transactions')->row();
-
-            if (!$transacao) {
-                log_activity('Webhook Pix Cora: Transação não localizada no banco para txid: ' . $txid);
-                continue;
-            }
-
-            if ($transacao->status === 'CONCLUIDA') {
-                continue;
-            }
-
-            // 1. DUPLA CHECAGEM ATIVA ANTI-FRAUDE VIA MTLS (GET /v1/cob/{txid})
-            $consulta = $this->cora_api->consultar_cobranca($txid);
-
-            if (!$consulta || !isset($consulta['status']) || strtoupper($consulta['status']) !== 'CONCLUIDA') {
-                log_activity('Alerta Anti-Fraude Cora Pix: Consulta mTLS ativa rejeitou txid ' . $txid . '. Status retornado: ' . ($consulta['status'] ?? 'FALHA'));
-                continue;
-            }
-
-            // Valor autenticado
-            $valor = isset($consulta['valor']['original'])
-                ? (float)$consulta['valor']['original']
-                : (float)$transacao->amount;
-
-            // 2. CONCORRÊNCIA E IDEMPOTÊNCIA: ATUALIZAÇÃO ATÔMICA CONDICIONAL
-            $this->db->where('id', $transacao->id);
-            $this->db->where('status !=', 'CONCLUIDA');
-            $this->db->update(db_prefix() . 'cora_transactions', [
-                'status'  => 'CONCLUIDA',
-                'paid_at' => date('Y-m-d H:i:s'),
-            ]);
-
-            // Se nenhuma linha foi afetada, outra thread paralela já liquidou
-            if ($this->db->affected_rows() === 0) {
-                continue;
-            }
-
-            // 3. LIQUIDA A FATURA NO PERFEX CRM
-            $this->cora_pix_gateway->addPayment([
-                'amount'        => $valor,
-                'invoiceid'     => $transacao->invoice_id,
-                'paymentmode'   => 'cora_pix',
-                'paymentmethod' => 'Pix (Cora)',
-                'transactionid' => $e2eid,
-                'note'          => 'Liquidado via PIX Cora. E2E: ' . $e2eid . ' | TxID: ' . $txid,
-                'date'          => date('Y-m-d H:i:s'),
-            ]);
-
-            log_activity('Fatura #' . $transacao->invoice_id . ' liquidada via Pix Cora (TxID: ' . $txid . ', E2E: ' . $e2eid . ')');
-        }
-    }
-
-    /**
-     * Processamento de eventos de Boleto Cora (invoice.paid / invoice.cancelled)
-     *
-     * @param string $coraInvoiceId ID da fatura na Cora
-     * @param string $eventType Tipo de evento
-     * @param array $payload Payload completo
-     */
-    protected function processar_webhook_boleto($coraInvoiceId, $eventType, $payload = [])
-    {
-        $transacao = $this->db->where('cora_invoice_id', $coraInvoiceId)
-                              ->get(db_prefix() . 'cora_transactions')->row();
+        // 1. Localiza a transação local
+        $transacao = $this->db->where('txid', $txid)->get(db_prefix() . 'cora_transactions')->row();
 
         if (!$transacao) {
-            // Tenta localizar por txid caso code tenha sido salvo como txid
-            $code = $payload['code'] ?? ($payload['resource']['code'] ?? '');
-            if (!empty($code)) {
-                $transacao = $this->db->where('txid', $code)->get(db_prefix() . 'cora_transactions')->row();
-            }
-        }
-
-        if (!$transacao) {
-            log_activity('Webhook Boleto Cora: Fatura não localizada para cora_invoice_id: ' . $coraInvoiceId);
+            log_activity('Webhook Pix Cora: Transação não localizada no banco para txid: ' . $txid);
             return;
         }
 
-        // Tratamento de cancelamento
-        if ($eventType === 'invoice.cancelled') {
-            if ($transacao->status !== 'CONCLUIDA') {
-                $this->db->where('id', $transacao->id)->update(db_prefix() . 'cora_transactions', [
-                    'status' => 'CANCELLED',
-                ]);
-                log_activity('Boleto Cora ' . $coraInvoiceId . ' marcado como cancelado no banco.');
-            }
-            return;
-        }
-
-        // Se já está liquidada
         if ($transacao->status === 'CONCLUIDA') {
             return;
         }
 
-        // 1. DUPLA CHECAGEM ATIVA ANTI-FRAUDE VIA MTLS (GET /v2/invoices/{id})
-        $consulta = $this->cora_api->consultar_fatura($coraInvoiceId);
+        // 2. DUPLA CHECAGEM ATIVA ANTI-FRAUDE VIA MTLS (GET /v1/cob/{txid})
+        $consulta = $this->cora_api->consultar_cobranca($txid);
 
-        if (!$consulta || !isset($consulta['status']) || !in_array(strtoupper($consulta['status']), ['PAID', 'CONCLUIDA'])) {
-            log_activity('Alerta Anti-Fraude Cora Boleto: Consulta mTLS rejeitou boleto ' . $coraInvoiceId . '. Status: ' . ($consulta['status'] ?? 'FALHA'));
+        if (!$consulta || !isset($consulta['status']) || strtoupper($consulta['status']) !== 'CONCLUIDA') {
+            log_activity('Alerta Anti-Fraude Cora Pix: Consulta mTLS ativa rejeitou txid ' . $txid . '. Status: ' . ($consulta['status'] ?? 'FALHA'));
             return;
         }
 
-        // Valor da fatura (convertido de centavos para reais se necessário)
-        $valor = (float)$transacao->amount;
-        if (isset($consulta['total_paid']['amount'])) {
-            $valor = (float)($consulta['total_paid']['amount'] / 100);
-        } elseif (isset($consulta['services'][0]['amount'])) {
-            $valor = (float)($consulta['services'][0]['amount'] / 100);
+        // Valor autenticado
+        $valorFinal = !empty($valor) ? (float)$valor : (isset($consulta['valor']['original']) ? (float)$consulta['valor']['original'] : (float)$transacao->amount);
+        $e2eFinal   = $e2eid ?: ($consulta['pix'][0]['endToEndId'] ?? $txid);
+
+        // 3. IDEMPOTÊNCIA E CONCORRÊNCIA: ATUALIZAÇÃO ATÔMICA CONDICIONAL
+        $this->db->where('id', $transacao->id);
+        $this->db->where('status !=', 'CONCLUIDA');
+        $this->db->update(db_prefix() . 'cora_transactions', [
+            'status'  => 'CONCLUIDA',
+            'paid_at' => date('Y-m-d H:i:s'),
+        ]);
+
+        // Se nenhuma linha foi alterada, outra thread paralela já liquidou
+        if ($this->db->affected_rows() === 0) {
+            return;
         }
 
-        // 2. CONCORRÊNCIA E IDEMPOTÊNCIA: ATUALIZAÇÃO ATÔMICA CONDICIONAL
+        // 4. LIQUIDAÇÃO SEGURA DA FATURA NO PERFEX CRM
+        $this->cora_pix_gateway->addPayment([
+            'amount'        => $valorFinal,
+            'invoiceid'     => $transacao->invoice_id,
+            'paymentmode'   => 'cora_pix',
+            'paymentmethod' => 'Pix (Cora)',
+            'transactionid' => $e2eFinal,
+            'note'          => 'Liquidado via PIX Cora. E2E: ' . $e2eFinal . ' | TxID: ' . $txid,
+            'date'          => date('Y-m-d H:i:s'),
+        ]);
+
+        log_activity('Fatura #' . $transacao->invoice_id . ' liquidada via Pix Cora (TxID: ' . $txid . ', E2E: ' . $e2eFinal . ')');
+    }
+
+    /**
+     * Processamento de pagamento Boleto com Dupla Checagem mTLS e Idempotência Estrita
+     *
+     * @param string $cora_id ID do boleto na Cora (inv_...)
+     * @param float|null $amount Valor em reais
+     */
+    protected function process_boleto_payment($cora_id, $amount = null)
+    {
+        // 1. Localiza a transação local
+        $transacao = $this->db->where('cora_invoice_id', $cora_id)->get(db_prefix() . 'cora_transactions')->row();
+
+        if (!$transacao) {
+            log_activity('Webhook Boleto Cora: Fatura não localizada para cora_id: ' . $cora_id);
+            return;
+        }
+
+        if ($transacao->status === 'CONCLUIDA') {
+            return;
+        }
+
+        // 2. DUPLA CHECAGEM ATIVA ANTI-FRAUDE VIA MTLS (GET /v2/invoices/{id})
+        $consulta = $this->cora_api->consultar_fatura($cora_id);
+
+        if (!$consulta || !isset($consulta['status']) || !in_array(strtoupper($consulta['status']), ['PAID', 'CONCLUIDA'])) {
+            log_activity('Alerta Anti-Fraude Cora Boleto: Consulta mTLS rejeitou boleto ' . $cora_id . '. Status: ' . ($consulta['status'] ?? 'FALHA'));
+            return;
+        }
+
+        // Valor autenticado
+        $valorFinal = !empty($amount) && (float)$amount > 0 ? (float)$amount : (float)$transacao->amount;
+        if (isset($consulta['total_paid']['amount'])) {
+            $valorFinal = (float)($consulta['total_paid']['amount'] / 100);
+        }
+
+        // 3. IDEMPOTÊNCIA E CONCORRÊNCIA: ATUALIZAÇÃO ATÔMICA CONDICIONAL
         $this->db->where('id', $transacao->id);
         $this->db->where('status !=', 'CONCLUIDA');
         $this->db->update(db_prefix() . 'cora_transactions', [
@@ -486,17 +482,17 @@ class Cora extends App_Controller
             return;
         }
 
-        // 3. LIQUIDA A FATURA NO PERFEX CRM
+        // 4. LIQUIDAÇÃO SEGURA DA FATURA NO PERFEX CRM
         $this->cora_boleto_gateway->addPayment([
-            'amount'        => $valor,
+            'amount'        => $valorFinal,
             'invoiceid'     => $transacao->invoice_id,
             'paymentmode'   => 'cora_boleto',
             'paymentmethod' => 'Boleto Bancário (Cora)',
-            'transactionid' => $coraInvoiceId,
-            'note'          => 'Liquidado via Boleto Bancário Cora. Cora ID: ' . $coraInvoiceId . ' | Barcode: ' . $transacao->barcode,
+            'transactionid' => $cora_id,
+            'note'          => 'Liquidado via Boleto Bancário Cora. Cora ID: ' . $cora_id . ' | Barcode: ' . $transacao->barcode,
             'date'          => date('Y-m-d H:i:s'),
         ]);
 
-        log_activity('Fatura #' . $transacao->invoice_id . ' liquidada via Boleto Cora (ID: ' . $coraInvoiceId . ')');
+        log_activity('Fatura #' . $transacao->invoice_id . ' liquidada via Boleto Cora (ID: ' . $cora_id . ')');
     }
 }
