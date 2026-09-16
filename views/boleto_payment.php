@@ -335,16 +335,6 @@
         }
 
         function copyToClipboard(content, buttonElement, successHtml) {
-            if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(content).then(function() {
-                    applySuccess();
-                }).catch(function() {
-                    fallbackCopy(content, applySuccess);
-                });
-            } else {
-                fallbackCopy(content, applySuccess);
-            }
-
             function applySuccess() {
                 var originalHtml = buttonElement.innerHTML;
                 buttonElement.classList.add("copied");
@@ -354,18 +344,35 @@
                     buttonElement.innerHTML = originalHtml;
                 }, 3000);
             }
+
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(content).then(function() {
+                    applySuccess();
+                }).catch(function() {
+                    fallbackCopy(content, applySuccess);
+                });
+            } else {
+                fallbackCopy(content, applySuccess);
+            }
         }
 
         function fallbackCopy(text, callback) {
             var tempInput = document.createElement("textarea");
             tempInput.value = text;
+            tempInput.style.position = "fixed";
+            tempInput.style.left = "-9999px";
             document.body.appendChild(tempInput);
+            tempInput.focus();
             tempInput.select();
             try {
-                document.execCommand('copy');
-                if (callback) callback();
+                var successful = document.execCommand('copy');
+                if (successful && callback) {
+                    callback();
+                } else if (!successful) {
+                    alert("Não foi possível copiar automaticamente. Selecione e copie o código manualmente.");
+                }
             } catch (err) {
-                alert("Por favor copie manualmente.");
+                alert("Não foi possível copiar automaticamente. Selecione e copie o código manualmente.");
             }
             document.body.removeChild(tempInput);
         }

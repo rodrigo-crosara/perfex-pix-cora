@@ -295,9 +295,13 @@ class Cora_gateway_controller extends App_Controller
                 ]);
             }
         } catch (Exception $e) {
+            $msg = $e->getMessage();
+            if (strpos($msg, 'cURL error 58') !== false || strpos($msg, 'unable to set private key') !== false) {
+                $msg .= ' (Dica de Permissão Linux: Verifique se o processo PHP/PHP-FPM possui permissão de leitura nos arquivos da pasta certs/. O módulo define 0640 automaticamente, mas confirme se o proprietário (chown) da pasta pertence ao usuário do servidor web/PHP-FPM).';
+            }
             echo json_encode([
                 'success' => false,
-                'message' => 'Falha de comunicação mTLS com a Cora: ' . $e->getMessage(),
+                'message' => 'Falha de comunicação mTLS com a Cora: ' . $msg,
             ]);
         }
         exit;

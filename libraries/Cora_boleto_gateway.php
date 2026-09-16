@@ -153,8 +153,8 @@ class Cora_boleto_gateway extends App_gateway
             return;
         }
 
-        // 2. Validação Fiscal: Documento (CPF ou CNPJ)
-        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        // 2. Validação Fiscal: Documento (CPF ou CNPJ) - Preservação estrita de zeros como string
+        $doc = (string) preg_replace('/\D/', '', $invoice->client->vat ?? '');
         if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
             set_alert('danger', 'O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Boleto Bancário.');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));

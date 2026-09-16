@@ -134,8 +134,8 @@ class Cora_pix_gateway extends App_gateway
             return;
         }
 
-        // Validação Fiscal: Documento (CPF ou CNPJ)
-        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        // Validação Fiscal: Documento (CPF ou CNPJ) - Preservação estrita de zeros como string
+        $doc = (string) preg_replace('/\D/', '', $invoice->client->vat ?? '');
         if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
             set_alert('danger', 'O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para pagar com Pix.');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));

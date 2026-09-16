@@ -171,12 +171,16 @@ class Cora_api
         // Sincronização inteligente com verificação de hash MD5 (evita gravação em disco se idêntico)
         if (!file_exists($certFile) || md5_file($certFile) !== md5($certContent)) {
             @file_put_contents($certFile, $certContent);
-            @chmod($certFile, 0600);
+            @chmod($certFile, 0640);
+        } else {
+            @chmod($certFile, 0640);
         }
 
         if (!file_exists($keyFile) || md5_file($keyFile) !== md5($keyContent)) {
             @file_put_contents($keyFile, $keyContent);
-            @chmod($keyFile, 0600);
+            @chmod($keyFile, 0640);
+        } else {
+            @chmod($keyFile, 0640);
         }
 
         return ['cert' => $certFile, 'key' => $keyFile];
@@ -370,8 +374,8 @@ class Cora_api
             throw new Exception('Chave Pix não configurada nas configurações do gateway.');
         }
 
-        // Validação Fiscal: Documento (CPF 11 ou CNPJ 14)
-        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        // Validação Fiscal: Documento (CPF 11 ou CNPJ 14) - Preservação estrita de zeros à esquerda como string
+        $doc = (string) preg_replace('/\D/', '', $invoice->client->vat ?? '');
         if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
             throw new Exception('O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Pix.');
         }
@@ -492,8 +496,8 @@ class Cora_api
      */
     public function criar_boleto($invoice, $amount, $customOptions = [])
     {
-        // 1. Validação Fiscal do Cliente: Documento (CPF 11 ou CNPJ 14)
-        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        // 1. Validação Fiscal do Cliente: Documento (CPF 11 ou CNPJ 14) - Preservação estrita de zeros como string
+        $doc = (string) preg_replace('/\D/', '', $invoice->client->vat ?? '');
         if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
             throw new Exception('O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Boleto Bancário.');
         }
@@ -544,12 +548,16 @@ class Cora_api
             'name'     => mb_substr($clientName, 0, 150, 'UTF-8'),
             'email'    => $clientEmail,
             'document' => [
-                'identity' => $doc,
+                'identity' => (string) $doc,
                 'type'     => (strlen($doc) > 11) ? 'CNPJ' : 'CPF',
             ],
-            'phone'    => !empty($phone) ? $phone : null,
             'address'  => $this->montar_endereco_cliente($invoice),
         ];
+
+        // 2. Telefone do cliente: incluir apenas se existir (evita erro 422 de validação de schema na Cora v2)
+        if (!empty($phone)) {
+            $customerObj['phone'] = (string) $phone;
+        }
 
         // 2. Faturas Já Vencidas no Perfex (Tolerância Anti-Erro 422 na Cora)
         $hoje = date('Y-m-d');

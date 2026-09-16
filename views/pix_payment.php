@@ -289,42 +289,60 @@
             });
         }
 
-        // 2. Ação de Copiar Código Pix com feedback
+        // 2. Ação de Copiar Código Pix com feedback e fallback universal HTTP/HTTPS
         var btnCopy = document.getElementById("btn-copy");
         var copyInput = document.getElementById("pix-copia-cola");
 
-        btnCopy.addEventListener("click", function() {
-            copyInput.select();
-            copyInput.setSelectionRange(0, 99999);
+        function mostrarFeedbackCopiado() {
+            var originalHtml = btnCopy.innerHTML;
+            btnCopy.classList.add("copied");
+            btnCopy.innerHTML = '<i class="fas fa-check"></i> Código Pix Copiado!';
+            setTimeout(function() {
+                btnCopy.classList.remove("copied");
+                btnCopy.innerHTML = originalHtml;
+            }, 3500);
+        }
 
+        function copiarPix(texto) {
             if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(pixPayload).then(function() {
-                    applyCopiedState();
-                }).catch(function() {
-                    fallbackCopy();
-                });
+                navigator.clipboard.writeText(texto)
+                    .then(mostrarFeedbackCopiado)
+                    .catch(function() {
+                        fallbackCopiar(texto);
+                    });
             } else {
-                fallbackCopy();
+                // Fallback para HTTP ou navegadores sem suporte direto à Clipboard API
+                fallbackCopiar(texto);
             }
+        }
 
-            function fallbackCopy() {
-                try {
-                    document.execCommand('copy');
-                    applyCopiedState();
-                } catch (err) {
-                    alert("Por favor, selecione e copie o código manualmente.");
+        function fallbackCopiar(texto) {
+            var inputTemp = document.createElement("textarea");
+            inputTemp.value = texto;
+            inputTemp.style.position = "fixed";
+            inputTemp.style.left = "-9999px";
+            document.body.appendChild(inputTemp);
+            inputTemp.focus();
+            inputTemp.select();
+            try {
+                var successful = document.execCommand('copy');
+                if (successful) {
+                    mostrarFeedbackCopiado();
+                } else {
+                    alert('Não foi possível copiar automaticamente. Selecione e copie o código manualmente.');
                 }
+            } catch (err) {
+                alert('Não foi possível copiar automaticamente. Selecione e copie o código manualmente.');
             }
+            document.body.removeChild(inputTemp);
+        }
 
-            function applyCopiedState() {
-                var originalHtml = btnCopy.innerHTML;
-                btnCopy.classList.add("copied");
-                btnCopy.innerHTML = '<i class="fas fa-check"></i> Código Pix Copiado!';
-                setTimeout(function() {
-                    btnCopy.classList.remove("copied");
-                    btnCopy.innerHTML = originalHtml;
-                }, 3500);
+        btnCopy.addEventListener("click", function() {
+            if (copyInput) {
+                copyInput.select();
+                copyInput.setSelectionRange(0, 99999);
             }
+            copiarPix(pixPayload);
         });
 
         // 3. Polling em segundo plano para detecção em tempo real do Webhook

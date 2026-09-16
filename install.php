@@ -84,7 +84,19 @@ if ($CI->db->table_exists($legacyTable)) {
 // 3. Estrutura e Blindagem de Segurança do Diretório de Certificados mTLS
 $certsDir = module_dir_path('cora_payments', 'certs');
 if (!is_dir($certsDir)) {
-    @mkdir($certsDir, 0700, true);
+    @mkdir($certsDir, 0750, true);
+} else {
+    @chmod($certsDir, 0750);
+}
+
+// Atualiza permissões de leitura dos certificados caso já existam em disco (0640 para compatibilidade PHP-FPM)
+$certFile = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'cora_cert.pem';
+$keyFile  = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'cora_key.key';
+if (file_exists($certFile)) {
+    @chmod($certFile, 0640);
+}
+if (file_exists($keyFile)) {
+    @chmod($keyFile, 0640);
 }
 
 // Grava .htaccess para Apache/LiteSpeed
