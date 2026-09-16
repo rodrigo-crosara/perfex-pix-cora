@@ -565,16 +565,24 @@ class Cora_api
             'due_date' => $data_vencimento,
         ];
 
-        // Multa por atraso (%)
-        $multaPercent = isset($customOptions['multa']) ? (float)$customOptions['multa'] : (float)$this->get_credential('multa_percentual', 'cora_boleto');
+        // Multa por atraso (%) - Validação com fallback 0 para não enviar null
+        $rawMulta = isset($customOptions['multa']) && $customOptions['multa'] !== '' 
+            ? $customOptions['multa'] 
+            : $this->get_credential('multa_percentual', 'cora_boleto');
+        $multaPercent = is_numeric($rawMulta) ? (float)$rawMulta : 0.0;
+
         if ($multaPercent > 0) {
             $paymentTerms['fine'] = [
                 'rate' => round($multaPercent, 2),
             ];
         }
 
-        // Juros de mora ao mês (%)
-        $jurosPercent = isset($customOptions['juros']) ? (float)$customOptions['juros'] : (float)$this->get_credential('juros_mensal_percentual', 'cora_boleto');
+        // Juros de mora ao mês (%) - Validação com fallback 0 para não enviar null
+        $rawJuros = isset($customOptions['juros']) && $customOptions['juros'] !== '' 
+            ? $customOptions['juros'] 
+            : $this->get_credential('juros_mensal_percentual', 'cora_boleto');
+        $jurosPercent = is_numeric($rawJuros) ? (float)$rawJuros : 0.0;
+
         if ($jurosPercent > 0) {
             $paymentTerms['interest'] = [
                 'rate' => round($jurosPercent, 2),

@@ -49,9 +49,18 @@ hooks()->add_action('pre_system', function () {
             $whitelist = [];
         }
         $whitelist[] = 'cora_payments/cora/webhook';
+        $whitelist[] = 'cora_payments/cora/webhook/';
+        $whitelist[] = 'cora_payments/cora/webhook/.*';
         $whitelist[] = 'cora_payments/cora/webhook/*';
         $whitelist[] = 'cora_payments/webhook';
-        $CI->config->set_item('csrf_exclude_uris', $whitelist);
+        $whitelist[] = 'cora_payments/webhook/';
+        $whitelist[] = 'cora_payments/webhook/.*';
+        $whitelist[] = 'cora_payments/webhook/*';
+        $whitelist[] = 'cora/webhook';
+        $whitelist[] = 'cora/webhook/';
+        $whitelist[] = 'cora/webhook/.*';
+        $whitelist[] = 'cora/webhook/*';
+        $CI->config->set_item('csrf_exclude_uris', array_unique($whitelist));
     }
 });
 
@@ -67,8 +76,16 @@ function cora_payments_csrf_exclude($uris)
     }
     $uris[] = 'cora_payments/cora/webhook';
     $uris[] = 'cora_payments/cora/webhook/';
+    $uris[] = 'cora_payments/cora/webhook/.*';
     $uris[] = 'cora_payments/cora/webhook/*';
     $uris[] = 'cora_payments/webhook';
+    $uris[] = 'cora_payments/webhook/';
+    $uris[] = 'cora_payments/webhook/.*';
+    $uris[] = 'cora_payments/webhook/*';
+    $uris[] = 'cora/webhook';
+    $uris[] = 'cora/webhook/';
+    $uris[] = 'cora/webhook/.*';
+    $uris[] = 'cora/webhook/*';
     return array_unique($uris);
 }
 

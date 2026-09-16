@@ -118,6 +118,14 @@ class Cora_pix_gateway extends App_gateway
         $invoice = $data['invoice'];
         $amount  = (float)$data['amount'];
 
+        // 0. Bloqueio de Faturas em Rascunho (STATUS_DRAFT = 6)
+        $statusDraft = defined('Invoices_model::STATUS_DRAFT') ? Invoices_model::STATUS_DRAFT : 6;
+        if ((int)$invoice->status === (int)$statusDraft) {
+            set_alert('warning', 'Esta fatura ainda se encontra em rascunho e não pode receber pagamentos.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+            return;
+        }
+
         // Validação de Moeda: Apenas BRL é permitido
         $currency = isset($invoice->currency_name) ? $invoice->currency_name : 'BRL';
         if (strtoupper(trim($currency)) !== 'BRL') {

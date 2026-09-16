@@ -49,6 +49,13 @@ class Cora extends App_Controller
             return;
         }
 
+        $statusDraft = defined('Invoices_model::STATUS_DRAFT') ? Invoices_model::STATUS_DRAFT : 6;
+        if ((int)$invoice->status === (int)$statusDraft) {
+            set_alert('warning', 'Esta fatura ainda se encontra em rascunho e não pode receber pagamentos.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+            return;
+        }
+
         // Fatura já quitada (Status 2 = STATUS_PAID no Perfex CRM)
         if ((int)$invoice->status === 2) {
             set_alert('info', 'Esta fatura já se encontra liquidada.');
@@ -117,6 +124,13 @@ class Cora extends App_Controller
 
         if (!$transaction) {
             show_error('Boleto bancário não encontrado para esta fatura.', 404);
+            return;
+        }
+
+        $statusDraft = defined('Invoices_model::STATUS_DRAFT') ? Invoices_model::STATUS_DRAFT : 6;
+        if ((int)$invoice->status === (int)$statusDraft) {
+            set_alert('warning', 'Esta fatura ainda se encontra em rascunho e não pode receber pagamentos.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;
         }
 

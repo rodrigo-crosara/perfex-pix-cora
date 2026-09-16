@@ -18,7 +18,7 @@ if (!$CI->db->table_exists($tableName)) {
         `id` INT(11) NOT NULL AUTO_INCREMENT,
         `invoice_id` INT(11) NOT NULL,
         `type` VARCHAR(10) NOT NULL DEFAULT 'PIX',
-        `txid` VARCHAR(50) NOT NULL,
+        `txid` VARCHAR(64) NOT NULL,
         `cora_invoice_id` VARCHAR(100) DEFAULT NULL,
         `amount` DECIMAL(15,2) NOT NULL DEFAULT '0.00',
         `pix_copia_cola` TEXT DEFAULT NULL,
@@ -34,6 +34,9 @@ if (!$CI->db->table_exists($tableName)) {
         KEY `cora_invoice_id` (`cora_invoice_id`)
     ) ENGINE=InnoDB DEFAULT CHARSET=" . $CI->db->char_set . ';');
 } else {
+    // Garante que o campo txid tenha pelo menos VARCHAR(64) para evitar truncamento
+    $CI->db->query("ALTER TABLE `{$tableName}` MODIFY `txid` VARCHAR(64) NOT NULL;");
+
     // Migração de campos se a tabela já existir previamente
     if (!$CI->db->field_exists('type', $tableName)) {
         $CI->db->query("ALTER TABLE `{$tableName}` ADD `type` VARCHAR(10) NOT NULL DEFAULT 'PIX' AFTER `invoice_id`;");
