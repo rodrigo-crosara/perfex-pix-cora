@@ -5,7 +5,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 /*
 Module Name: Pix Direto Banco Cora
 Description: Integração nativa e direta com o Pix do Banco Cora para Perfex CRM via autenticação mTLS e conciliação automática por Webhook.
-Version: 1.1.0
+Version: 1.3.0
 Requires at least: 2.3.*
 Author: Perfex CRM Integration Team
 */
@@ -101,4 +101,82 @@ function pix_cora_check_currency_available($available, $gateway, $invoice)
     }
 
     return $available;
+}
+
+/**
+ * 2. Botão "Testar Conexão com a Cora" na Aba de Configurações
+ * Injeta o botão de teste e o script assíncrono para feedback instantâneo ao administrador.
+ */
+hooks()->add_action('after_payment_gateways_settings', 'pix_cora_render_test_button');
+
+function pix_cora_render_test_button()
+{
+    $adminTestUrl = admin_url('pix_cora/pix/test_connection');
+    $siteTestUrl  = site_url('pix_cora/pix/test_connection');
+    ?>
+    <script>
+    document.addEventListener("DOMContentLoaded", function() {
+        var container = document.querySelector('#online_payments_pix_cora_tab');
+        if (!container) return;
+
+        var wrapper = document.createElement('div');
+        wrapper.className = 'form-group mtop25';
+        wrapper.style.borderTop = '1px solid #e2e8f0';
+        wrapper.style.paddingTop = '15px';
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-info';
+        btn.innerHTML = '<i class="fa fa-plug"></i> Testar Conexão com a Cora';
+
+        var resultBox = document.createElement('div');
+        resultBox.id = 'cora_test_result';
+        resultBox.style.marginTop = '12px';
+        resultBox.style.display = 'none';
+
+        btn.onclick = function() {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Testando Conexão mTLS...';
+            resultBox.style.display = 'none';
+
+            var targetUrl = '<?= $adminTestUrl; ?>';
+            fetch(targetUrl)
+                .then(function(r) {
+                    if (!r.ok) {
+                        return fetch('<?= $siteTestUrl; ?>').then(function(res) { return res.json(); });
+                    }
+                    return r.json();
+                })
+                .then(function(res) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-plug"></i> Testar Conexão com a Cora';
+
+                    if (typeof alert_float === 'function') {
+                        alert_float(res.success ? 'success' : 'danger', res.message);
+                    }
+
+                    resultBox.style.display = 'block';
+                    resultBox.className = res.success ? 'alert alert-success' : 'alert alert-danger';
+                    resultBox.innerHTML = '<strong>' + (res.success ? '<i class="fa fa-check-circle"></i> Sucesso: ' : '<i class="fa fa-exclamation-circle"></i> Falha: ') + '</strong>' + res.message;
+                })
+                .catch(function(err) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-plug"></i> Testar Conexão com a Cora';
+
+                    if (typeof alert_float === 'function') {
+                        alert_float('danger', 'Não foi possível conectar ao servidor para validar.');
+                    }
+
+                    resultBox.style.display = 'block';
+                    resultBox.className = 'alert alert-danger';
+                    resultBox.innerHTML = '<strong>Erro de requisição:</strong> Falha ao contatar o endpoint de teste de conexão.';
+                });
+        };
+
+        wrapper.appendChild(btn);
+        wrapper.appendChild(resultBox);
+        container.appendChild(wrapper);
+    });
+    </script>
+    <?php
 }

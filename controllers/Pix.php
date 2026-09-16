@@ -7,8 +7,9 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * 
  * Responsável por:
  * 1. Exibir a tela de pagamento com QR Code dinâmico e código Copia e Cola.
- * 2. Fornecer endpoint JSON para polling de status pelo cliente.
- * 3. Processar webhooks com dupla checagem anti-fraude via mTLS na API Cora.
+ * 2. Fornecer endpoint JSON de polling em tempo real para a view.
+ * 3. Processar webhooks com dupla checagem mTLS na API Cora e conciliação atômica anti-concorrência.
+ * 4. Endpoint de validação instantânea de conexão mTLS para administradores no painel.
  */
 class Pix extends App_Controller
 {
@@ -75,6 +76,7 @@ class Pix extends App_Controller
             'title'            => 'Pagamento Pix - Fatura #' . format_invoice_number($invoice->id),
             'invoice'          => $invoice,
             'transaction'      => $transaction,
+            'txid'             => $txid,
             'pix_copia_cola'   => $transaction->pix_copia_cola,
             'amount'           => $amountToPay,
             'check_status_url' => site_url('pix_cora/pix/check_status/' . $invoice->id . '/' . $txid),
@@ -85,55 +87,112 @@ class Pix extends App_Controller
     }
 
     /**
-     * 4. Endpoint de Polling para a Tela de Pagamento
+     * Endpoint de Polling para a Tela de Pagamento (payment.php)
      * Rota: GET pix_cora/pix/check_status/{invoice_id}/{txid}
-     * O JavaScript da view consulta essa rota a cada 3 a 5 segundos.
-     * Assim que o status for CONCLUIDA ou a fatura estiver paga, retorna paid: true
+     * O JavaScript da view payment.php consulta essa rota a cada 3 a 5 segundos.
+     * Assim que o status for CONCLUIDA ou a fatura estiver paga, retorna JSON confirmando.
      * 
      * @param int $invoice_id
      * @param string $txid
      */
     public function check_status($invoice_id = null, $txid = null)
     {
-        $this->output->set_content_type('application/json', 'utf-8');
-
         if (empty($invoice_id) || empty($txid)) {
-            $this->output->set_output(json_encode([
-                'paid'  => false,
-                'error' => 'Parâmetros ausentes'
-            ]));
-            return;
+            header('Content-Type: application/json');
+            echo json_encode(['paid' => false, 'error' => 'Parâmetros ausentes']);
+            exit;
         }
 
-        $invoice_id = (int)$invoice_id;
-        $invoice = $this->invoices_model->get($invoice_id);
+        $transacao = $this->db->where('txid', $txid)
+                              ->where('invoice_id', (int)$invoice_id)
+                              ->get(db_prefix() . 'pix_cora_transactions')->row();
 
-        $this->db->where('invoice_id', $invoice_id);
-        $this->db->where('txid', $txid);
-        $transaction = $this->db->get(db_prefix() . 'pix_cora_transactions')->row();
+        $invoice = $this->invoices_model->get((int)$invoice_id);
 
         $isPaid = false;
-        if (($transaction && $transaction->status === 'CONCLUIDA') || ($invoice && (int)$invoice->status === 2)) {
+        if (($transacao && $transacao->status === 'CONCLUIDA') || ($invoice && (int)$invoice->status === 2)) {
             $isPaid = true;
         }
 
-        $redirectUrl = $invoice ? site_url('invoice/' . $invoice->id . '/' . $invoice->hash) : site_url();
-
-        $this->output->set_output(json_encode([
+        header('Content-Type: application/json');
+        echo json_encode([
             'paid'         => $isPaid,
-            'status'       => $transaction ? $transaction->status : 'INEXISTENTE',
-            'redirect_url' => $redirectUrl,
-        ]));
+            'status'       => $transacao ? $transacao->status : 'INEXISTENTE',
+            'redirect_url' => $invoice ? site_url('invoice/' . $invoice->id . '/' . $invoice->hash) : site_url(),
+        ]);
+        exit;
     }
 
     /**
-     * 2. Webhook com Anti-Fraude (Dupla Checagem)
-     * Não confia cegamente no POST recebido. Consulta a API da Cora via mTLS (GET /v1/cob/{txid})
-     * para confirmar que a cobrança consta como CONCLUIDA diretamente nos servidores do banco.
+     * 2. Botão "Testar Conexão com a Cora" (Validação Instantânea)
+     * Permite ao administrador validar no painel se Client ID e Certificados mTLS estão corretos.
+     */
+    public function test_connection()
+    {
+        // Validação de permissões de acesso administrativo
+        if (function_exists('has_permission') && !has_permission('settings', '', 'view') && !is_admin()) {
+            if (function_exists('ajax_access_denied')) {
+                ajax_access_denied();
+            } else {
+                header('HTTP/1.1 403 Forbidden');
+                echo json_encode(['success' => false, 'message' => 'Acesso não autorizado.']);
+            }
+            exit;
+        }
+
+        header('Content-Type: application/json');
+
+        // 3. Diagnóstico Automático do Certificado e Chave Privada
+        $diag = $this->pix_cora_gateway->diagnosticar_certificados();
+        if (!$diag['cert_valido']) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Erro no Certificado: ' . $diag['cert_mensagem']
+            ]);
+            exit;
+        }
+
+        if (!$diag['key_valida']) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Erro na Chave Privada: ' . $diag['key_mensagem']
+            ]);
+            exit;
+        }
+
+        // Tenta autenticar via mTLS na API da Cora
+        try {
+            $token = $this->pix_cora_gateway->get_token();
+
+            if ($token) {
+                $isSandbox = (int)$this->pix_cora_gateway->getSetting('sandbox') === 1;
+                $ambiente = $isSandbox ? 'Homologação / Stage' : 'Produção';
+
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Conexão mTLS bem-sucedida no ambiente ' . $ambiente . '! Certificados válidos e Token OAuth2 gerado pela Cora com sucesso.'
+                ]);
+            } else {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Falha na autenticação mTLS. Verifique os certificados e o Client ID.'
+                ]);
+            }
+        } catch (Exception $e) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Erro na validação mTLS: ' . $e->getMessage()
+            ]);
+        }
+        exit;
+    }
+
+    /**
+     * Processamento do Webhook com Concorrência Atômica e Dupla Checagem Ativa
      */
     public function webhook()
     {
-        // Garante que o CSRF não interfira na requisição externa
+        // Desativa a checagem de CSRF para requisições externas do webhook
         if (isset($this->security)) {
             $this->security->csrf_verify = false;
         }
@@ -141,10 +200,9 @@ class Pix extends App_Controller
         $rawInput = file_get_contents('php://input');
 
         if (empty($rawInput)) {
-            $this->output
-                ->set_status_header(400)
-                ->set_content_type('application/json', 'utf-8')
-                ->set_output(json_encode(['status' => 'error', 'message' => 'Empty payload']));
+            set_status_header(400);
+            header('Content-Type: application/json');
+            echo json_encode(['status' => 'error', 'message' => 'Empty payload']);
             return;
         }
 
@@ -152,14 +210,13 @@ class Pix extends App_Controller
 
         if (json_last_error() !== JSON_ERROR_NONE) {
             log_activity('Webhook Pix Cora com JSON malformado: ' . $rawInput);
-            $this->output
-                ->set_status_header(400)
-                ->set_content_type('application/json', 'utf-8')
-                ->set_output(json_encode(['status' => 'error', 'message' => 'Invalid JSON']));
+            set_status_header(400);
+            header('Content-Type: application/json');
+            echo json_encode(['status' => 'error', 'message' => 'Invalid JSON']);
             return;
         }
 
-        // Identifica os itens de Pix notificados
+        // Identifica e normaliza os itens de Pix notificados
         $pixItems = [];
 
         if (isset($data['pix']) && is_array($data['pix'])) {
@@ -171,105 +228,81 @@ class Pix extends App_Controller
         }
 
         if (empty($pixItems)) {
-            $this->output
-                ->set_status_header(200)
-                ->set_content_type('application/json', 'utf-8')
-                ->set_output(json_encode(['status' => 'ignored', 'message' => 'No pix items']));
+            set_status_header(200);
+            header('Content-Type: application/json');
+            echo json_encode(['status' => 'ignored', 'message' => 'No pix items found']);
             return;
         }
 
-        $processedCount = 0;
-
         foreach ($pixItems as $item) {
-            $txid = $item['txid'] ?? null;
-            $endToEndId = $item['endToEndId'] ?? ($item['end_to_end_id'] ?? null);
+            $txid  = $item['txid'] ?? null;
+            $e2eid = $item['endToEndId'] ?? ($item['end_to_end_id'] ?? $txid);
 
             if (empty($txid)) {
                 continue;
             }
 
             // Localiza a transação local
+            $reg = $this->db->where('txid', $txid)->get(db_prefix() . 'pix_cora_transactions')->row();
+
+            if (!$reg) {
+                log_activity('Webhook Pix Cora: Transação não localizada no banco para txid: ' . $txid);
+                continue;
+            }
+
+            // Se a transação já foi marcada como CONCLUIDA, ignora
+            if ($reg->status === 'CONCLUIDA') {
+                continue;
+            }
+
+            // =========================================================================
+            // 2. DUPLA CHECAGEM ATIVA ANTI-FRAUDE (GET /v1/cob/{txid})
+            // =========================================================================
+            $consulta = $this->pix_cora_gateway->consultar_cobranca($txid);
+
+            if (!$consulta || !isset($consulta['status']) || strtoupper($consulta['status']) !== 'CONCLUIDA') {
+                log_activity('Alerta Anti-Fraude Pix Cora: Consulta mTLS ativa rejeitou txid ' . $txid . '. Status na Cora: ' . ($consulta['status'] ?? 'FALHA'));
+                continue;
+            }
+
+            // Obtém o valor autenticado retornado pela Cora ou o valor da transação
+            $valor = isset($consulta['valor']['original']) ? (float)$consulta['valor']['original'] : (float)$reg->amount;
+
+            // =========================================================================
+            // 1. CONCORRÊNCIA E IDEMPOTÊNCIA: ATUALIZAÇÃO CONDICIONAL ATÔMICA
+            // Apenas a thread que atualizar a linha com sucesso tem permissão para dar baixa
+            // =========================================================================
             $this->db->where('txid', $txid);
-            $transaction = $this->db->get(db_prefix() . 'pix_cora_transactions')->row();
+            $this->db->where('status !=', 'CONCLUIDA');
+            $this->db->update(db_prefix() . 'pix_cora_transactions', [
+                'status'  => 'CONCLUIDA',
+                'paid_at' => date('Y-m-d H:i:s'),
+            ]);
 
-            if (!$transaction) {
-                log_activity('Webhook Pix Cora: Transação não localizada no banco local para txid: ' . $txid);
-                continue;
-            }
-
-            // Idempotência: se já foi concluída, não executa baixa duplicada
-            if ($transaction->status === 'CONCLUIDA') {
-                $processedCount++;
+            // Se nenhuma linha foi alterada, a transação já foi processada por outra thread paralela
+            if ($this->db->affected_rows() === 0) {
                 continue;
             }
 
             // =========================================================================
-            // ANTI-FRAUDE: DUPLA CHECAGEM OBRIGATÓRIA NA API CORA VIA mTLS
+            // 3. DÁ BAIXA SEGURA NA FATURA NO PERFEX CRM
             // =========================================================================
-            $chargeData = $this->pix_cora_gateway->get_charge($txid);
-
-            if (!$chargeData || !isset($chargeData['status'])) {
-                log_activity('Alerta Anti-Fraude Pix Cora: Consulta mTLS falhou ao verificar txid ' . $txid . '. Notificação descartada.');
-                continue;
-            }
-
-            $coraStatus = strtoupper(trim($chargeData['status']));
-            if ($coraStatus !== 'CONCLUIDA') {
-                log_activity('Alerta Anti-Fraude Pix Cora: Status da cobrança na API Cora é "' . $coraStatus . '" (não CONCLUIDA). Baixa cancelada para txid: ' . $txid);
-                continue;
-            }
-
-            // Validação de fatura
-            $invoice = $this->invoices_model->get($transaction->invoice_id);
-            if (!$invoice) {
-                log_activity('Webhook Pix Cora: Fatura #' . $transaction->invoice_id . ' inexistente.');
-                continue;
-            }
-
-            // Valor autenticado pela API Cora ou registrado na transação
-            $officialAmount = 0.0;
-            if (isset($chargeData['valor']['original'])) {
-                $officialAmount = (float)$chargeData['valor']['original'];
-            } elseif (!empty($transaction->amount) && (float)$transaction->amount > 0) {
-                $officialAmount = (float)$transaction->amount;
-            } else {
-                $officialAmount = (float)$invoice->total;
-            }
-
-            // Baixa contábil no Perfex CRM
-            $paymentData = [
-                'amount'        => $officialAmount,
-                'invoiceid'     => (int)$transaction->invoice_id,
+            $this->pix_cora_gateway->addPayment([
+                'amount'        => $valor,
+                'invoiceid'     => $reg->invoice_id,
                 'paymentmode'   => 'pix_cora',
-                'paymentmethod' => 'Pix Banco Cora',
-                'transactionid' => !empty($endToEndId) ? $endToEndId : $txid,
-                'note'          => 'Pagamento Pix Banco Cora confirmado via mTLS Anti-Fraude. EndToEndId: ' . ($endToEndId ?: 'N/A') . ' | TxID: ' . $txid,
+                'paymentmethod' => 'PIX (Cora)',
+                'transactionid' => $e2eid,
+                'note'          => 'Liquidado via PIX Direto Cora. E2E: ' . $e2eid . ' | TxID: ' . $txid,
                 'date'          => date('Y-m-d H:i:s'),
-            ];
+            ]);
 
-            $paymentId = $this->pix_cora_gateway->addPayment($paymentData);
-
-            if ($paymentId) {
-                // Atualiza status da transação local
-                $this->db->where('id', $transaction->id);
-                $this->db->update(db_prefix() . 'pix_cora_transactions', [
-                    'status'  => 'CONCLUIDA',
-                    'paid_at' => date('Y-m-d H:i:s'),
-                ]);
-
-                log_activity('Pagamento Pix Cora liquidado e verificado com sucesso para Fatura #' . $transaction->invoice_id . ' (TxID: ' . $txid . ')');
-                $processedCount++;
-            } else {
-                log_activity('Falha ao registrar pagamento via addPayment para Fatura #' . $transaction->invoice_id);
-            }
+            log_activity('Fatura #' . $reg->invoice_id . ' liquidada com sucesso via Pix Cora (TxID: ' . $txid . ', E2E: ' . $e2eid . ')');
         }
 
-        $this->output
-            ->set_status_header(200)
-            ->set_content_type('application/json', 'utf-8')
-            ->set_output(json_encode([
-                'status'    => 'success',
-                'processed' => $processedCount,
-            ]));
+        set_status_header(200);
+        header('Content-Type: application/json');
+        echo json_encode(['status' => 'success']);
+        return;
     }
 }

@@ -7,7 +7,8 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * 
  * Gateway de Pagamento Pix Direto com Banco Cora para Perfex CRM.
  * Implementa autenticação mTLS (Mutual TLS), geração de cobrança Pix imediata (v1/cob),
- * consulta de cobrança anti-fraude (GET v1/cob/{txid}) e integração nativa com faturamento.
+ * consulta ativa anti-fraude (GET v1/cob/{txid}), diagnóstico em tempo real de certificados,
+ * gravação otimizada de certificados e controle rígido de concorrência e moedas.
  */
 class Pix_cora_gateway extends App_gateway
 {
@@ -21,12 +22,47 @@ class Pix_cora_gateway extends App_gateway
      */
     const STAGE_BASE_URL = 'https://matls-clients.stage.cora.com.br';
 
+    /**
+     * URL da API dinamicamente ajustada com base no ambiente (Sandbox vs Produção)
+     *
+     * @var string
+     */
+    public $api_base_url;
+
     public function __construct()
     {
         parent::__construct();
 
         $this->setId('pix_cora');
         $this->setName('Pix Banco Cora');
+
+        // 4. Alternador de Ambiente: Ajuste dinâmico da URL base
+        $is_sandbox = (bool)$this->getSetting('sandbox');
+        $this->api_base_url = $is_sandbox ? self::STAGE_BASE_URL : self::PROD_BASE_URL;
+
+        // 1. URL do Webhook pronta para copiar
+        $webhook_url = site_url('pix_cora/pix/webhook');
+
+        // 3. Diagnóstico Automático dos Certificados para exibição nas configurações
+        $diag = $this->diagnosticar_certificados();
+
+        $certInfo = '<p class="text-muted">Cole o conteúdo textual completo do certificado público (.pem ou .crt), incluindo as linhas -----BEGIN CERTIFICATE----- e -----END CERTIFICATE-----.</p>';
+        if (!empty($this->getSetting('cert_content'))) {
+            if ($diag['cert_valido']) {
+                $certInfo .= '<div class="alert alert-success mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-check-circle"></i> <strong>' . html_escape($diag['cert_mensagem']) . '</strong></div>';
+            } else {
+                $certInfo .= '<div class="alert alert-danger mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-exclamation-triangle"></i> <strong>' . html_escape($diag['cert_mensagem']) . '</strong></div>';
+            }
+        }
+
+        $keyInfo = '<p class="text-muted">Cole o conteúdo textual da sua chave privada (.key), incluindo as linhas -----BEGIN RSA PRIVATE KEY----- ou -----BEGIN PRIVATE KEY-----.</p>';
+        if (!empty($this->getSetting('key_content'))) {
+            if ($diag['key_valida']) {
+                $keyInfo .= '<div class="alert alert-success mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-check-circle"></i> <strong>' . html_escape($diag['key_mensagem']) . '</strong></div>';
+            } else {
+                $keyInfo .= '<div class="alert alert-danger mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-exclamation-triangle"></i> <strong>' . html_escape($diag['key_mensagem']) . '</strong></div>';
+            }
+        }
 
         /**
          * Configuração dos campos visíveis na aba Configurações > Gateways de Pagamento
@@ -48,22 +84,22 @@ class Pix_cora_gateway extends App_gateway
                 'name'          => 'cert_content',
                 'type'          => 'textarea',
                 'label'         => 'Certificado mTLS (.pem ou .crt)',
-                'info'          => '<p class="text-muted">Cole aqui o conteúdo textual completo do certificado público (incluindo as linhas -----BEGIN CERTIFICATE----- e -----END CERTIFICATE-----). O conteúdo é salvo criptografado no banco de dados.</p>',
+                'info'          => $certInfo,
                 'rows'          => 6,
             ],
             [
                 'name'          => 'key_content',
                 'type'          => 'textarea',
                 'label'         => 'Chave Privada mTLS (.key)',
-                'info'          => '<p class="text-muted">Cole aqui o conteúdo textual da sua chave privada (incluindo as linhas -----BEGIN RSA PRIVATE KEY----- ou -----BEGIN PRIVATE KEY-----). O conteúdo é salvo criptografado no banco de dados.</p>',
+                'info'          => $keyInfo,
                 'rows'          => 6,
             ],
             [
                 'name'          => 'sandbox',
                 'type'          => 'yes_no',
+                'label'         => 'Ambiente de Testes (Sandbox / Homologação)',
                 'default_value' => 0,
-                'label'         => 'Ambiente de Testes (Sandbox / Stage)',
-                'info'          => '<p class="text-muted">Ative caso utilize credenciais do ambiente de homologação (stage.cora.com.br). Deixe desativado para Produção.</p>',
+                'info'          => '<p class="text-muted">Ative para utilizar a URL de testes (https://matls-clients.stage.cora.com.br). Desative para Produção (https://matls-clients.api.cora.com.br).</p>',
             ],
             [
                 'name'          => 'expiration_minutes',
@@ -78,12 +114,12 @@ class Pix_cora_gateway extends App_gateway
                 'default_value' => 'BRL',
             ],
             [
-                'name'          => 'webhook_url_info',
-                'type'          => 'input',
-                'label'         => 'URL do Webhook para configurar no Banco Cora',
-                'default_value' => site_url('pix_cora/pix/webhook'),
-                'disabled'      => true,
-                'info'          => '<p class="text-info"><i class="fa fa-info-circle"></i> Cadastre esta exata URL no portal Cora Developers para conciliação automática com verificação anti-fraude.</p>',
+                'name'             => 'webhook_url_display',
+                'type'             => 'input',
+                'label'            => 'URL do Webhook (Copie e cole no painel da Cora)',
+                'default_value'    => $webhook_url,
+                'field_attributes' => ['readonly' => 'readonly', 'onclick' => 'this.select();'],
+                'info'             => '<p class="text-info"><i class="fa fa-info-circle"></i> Clique no campo acima para selecionar e copiar a URL oficial de conciliação para o portal Cora Developers.</p>',
             ],
         ]);
     }
@@ -95,7 +131,82 @@ class Pix_cora_gateway extends App_gateway
      */
     public function get_base_url()
     {
-        return ((int)$this->getSetting('sandbox') === 1) ? self::STAGE_BASE_URL : self::PROD_BASE_URL;
+        $is_sandbox = (bool)$this->getSetting('sandbox');
+        $this->api_base_url = $is_sandbox ? self::STAGE_BASE_URL : self::PROD_BASE_URL;
+        return $this->api_base_url;
+    }
+
+    /**
+     * 3. Diagnóstico Automático do Certificado e Chave Privada
+     * Analisa a estrutura e a validade temporal do certificado e valida o formato da chave RSA
+     *
+     * @return array
+     */
+    public function diagnosticar_certificados()
+    {
+        $certRaw = trim($this->getSetting('cert_content') ?? '');
+        $keyRaw  = trim($this->getSetting('key_content') ?? '');
+
+        $result = [
+            'cert_valido'   => false,
+            'cert_mensagem' => 'Certificado não configurado.',
+            'key_valida'    => false,
+            'key_mensagem'  => 'Chave privada não configurada.',
+            'expira_em'     => null,
+        ];
+
+        // Análise do Certificado Público
+        if (!empty($certRaw)) {
+            $certContent = $certRaw;
+            if (isset($this->ci->encryption) && strpos($certRaw, '-----BEGIN') === false) {
+                $decrypted = $this->ci->encryption->decrypt($certRaw);
+                if ($decrypted !== false && strpos($decrypted, '-----BEGIN') !== false) {
+                    $certContent = $decrypted;
+                }
+            }
+
+            $parsed = @openssl_x509_parse($certContent);
+            if ($parsed && isset($parsed['validTo_time_t'])) {
+                $validTo = date('d/m/Y H:i:s', $parsed['validTo_time_t']);
+                $result['expira_em'] = $validTo;
+
+                if (time() > $parsed['validTo_time_t']) {
+                    $result['cert_valido'] = false;
+                    $result['cert_mensagem'] = 'Certificado EXPIRADO em ' . $validTo . '! Emita um novo certificado no portal Cora.';
+                } else {
+                    $result['cert_valido'] = true;
+                    $issuer = $parsed['issuer']['CN'] ?? ($parsed['issuer']['O'] ?? 'Banco Cora');
+                    $result['cert_mensagem'] = 'Certificado válido até: ' . $validTo . ' (Emissor: ' . $issuer . ')';
+                }
+            } else {
+                $result['cert_valido'] = false;
+                $result['cert_mensagem'] = 'Formato de certificado inválido. Certifique-se de incluir as tags -----BEGIN CERTIFICATE----- e -----END CERTIFICATE-----.';
+            }
+        }
+
+        // Análise da Chave Privada
+        if (!empty($keyRaw)) {
+            $keyContent = $keyRaw;
+            if (isset($this->ci->encryption) && strpos($keyRaw, '-----BEGIN') === false) {
+                $decrypted = $this->ci->encryption->decrypt($keyRaw);
+                if ($decrypted !== false && strpos($decrypted, '-----BEGIN') !== false) {
+                    $keyContent = $decrypted;
+                }
+            }
+
+            $hasHeader = (strpos($keyContent, 'BEGIN RSA PRIVATE KEY') !== false || strpos($keyContent, 'BEGIN PRIVATE KEY') !== false);
+            $pkey = @openssl_pkey_get_private($keyContent);
+
+            if ($hasHeader && $pkey !== false) {
+                $result['key_valida'] = true;
+                $result['key_mensagem'] = 'Chave Privada RSA válida e compatível com OpenSSL.';
+            } else {
+                $result['key_valida'] = false;
+                $result['key_mensagem'] = 'Formato de chave privada incorreto. A chave deve conter -----BEGIN RSA PRIVATE KEY----- ou -----BEGIN PRIVATE KEY-----.';
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -124,61 +235,63 @@ class Pix_cora_gateway extends App_gateway
     }
 
     /**
-     * Sincroniza os conteúdos dos certificados salvando-os em arquivos físicos locais
-     * dentro de pasta segura aleatória com permissão 0600.
-     * Suporta dados criptografados com a chave do sistema Perfex CRM.
+     * 3. Otimização de I/O na Gravação dos Certificados
+     * Escreve os arquivos apenas se não existirem ou se o conteúdo no banco tiver mudado
+     * (verificado via md5_file vs md5 do conteúdo), evitando escrita desnecessária a cada requisição.
      *
-     * @return array Array com os caminhos absolutos ['cert' => $certPath, 'key' => $keyPath]
-     * @throws Exception Caso os certificados não estejam configurados ou não possam ser salvos
+     * @return array Caminhos dos certificados ['cert' => $cert_file, 'key' => $key_file]
+     * @throws Exception Caso os campos estejam vazios
      */
-    public function sync_certificates()
+    public function get_cert_paths()
     {
-        $certRaw = trim($this->getSetting('cert_content') ?? '');
-        $keyRaw  = trim($this->getSetting('key_content') ?? '');
+        $certsDir = $this->get_secure_certs_dir();
+        $certFile = $certsDir . DIRECTORY_SEPARATOR . 'certificate.pem';
+        $keyFile  = $certsDir . DIRECTORY_SEPARATOR . 'private_key.key';
 
-        if (empty($certRaw) || empty($keyRaw)) {
+        $certContent = trim($this->getSetting('cert_content') ?? '');
+        $keyContent  = trim($this->getSetting('key_content') ?? '');
+
+        if (empty($certContent) || empty($keyContent)) {
             throw new Exception('Certificado mTLS (.pem) ou Chave Privada (.key) não configurados nas opções do gateway Pix Cora.');
         }
 
-        // Se o conteúdo estiver encriptado via CI encryption, decripta
-        $certContent = $certRaw;
-        $keyContent  = $keyRaw;
-
+        // Suporte à decriptação caso o Perfex tenha salvo encriptado
         if (isset($this->ci->encryption)) {
-            if (strpos($certRaw, '-----BEGIN') === false) {
-                $decryptedCert = $this->ci->encryption->decrypt($certRaw);
+            if (strpos($certContent, '-----BEGIN') === false) {
+                $decryptedCert = $this->ci->encryption->decrypt($certContent);
                 if ($decryptedCert !== false && strpos($decryptedCert, '-----BEGIN') !== false) {
                     $certContent = $decryptedCert;
                 }
             }
-            if (strpos($keyRaw, '-----BEGIN') === false) {
-                $decryptedKey = $this->ci->encryption->decrypt($keyRaw);
+            if (strpos($keyContent, '-----BEGIN') === false) {
+                $decryptedKey = $this->ci->encryption->decrypt($keyContent);
                 if ($decryptedKey !== false && strpos($decryptedKey, '-----BEGIN') !== false) {
                     $keyContent = $decryptedKey;
                 }
             }
         }
 
-        $certsDir = $this->get_secure_certs_dir();
-        $certPath = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'cora_cert.pem';
-        $keyPath  = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'cora_key.key';
-
-        // Grava o certificado se o arquivo não existir ou se o conteúdo mudou
-        if (!file_exists($certPath) || file_get_contents($certPath) !== $certContent) {
-            file_put_contents($certPath, $certContent);
-            @chmod($certPath, 0600);
+        // Escreve o certificado apenas se não existir ou se o hash md5 mudou
+        if (!file_exists($certFile) || md5_file($certFile) !== md5($certContent)) {
+            @file_put_contents($certFile, $certContent);
+            @chmod($certFile, 0600);
         }
 
-        // Grava a chave privada se o arquivo não existir ou se o conteúdo mudou
-        if (!file_exists($keyPath) || file_get_contents($keyPath) !== $keyContent) {
-            file_put_contents($keyPath, $keyContent);
-            @chmod($keyPath, 0600);
+        // Escreve a chave privada apenas se não existir ou se o hash md5 mudou
+        if (!file_exists($keyFile) || md5_file($keyFile) !== md5($keyContent)) {
+            @file_put_contents($keyFile, $keyContent);
+            @chmod($keyFile, 0600);
         }
 
-        return [
-            'cert' => $certPath,
-            'key'  => $keyPath,
-        ];
+        return ['cert' => $certFile, 'key' => $keyFile];
+    }
+
+    /**
+     * Alias de compatibilidade para get_cert_paths()
+     */
+    public function sync_certificates()
+    {
+        return $this->get_cert_paths();
     }
 
     /**
@@ -194,7 +307,7 @@ class Pix_cora_gateway extends App_gateway
             throw new Exception('Client ID não configurado no módulo Pix Banco Cora.');
         }
 
-        $certs = $this->sync_certificates();
+        $certs = $this->get_cert_paths();
         $tokenUrl = $this->get_base_url() . '/token';
 
         $postFields = http_build_query([
@@ -241,64 +354,79 @@ class Pix_cora_gateway extends App_gateway
     }
 
     /**
-     * 2. Anti-Fraude no Webhook (Dupla Checagem)
-     * Realiza uma chamada GET /v1/cob/{txid} autenticada via mTLS na própria API da Cora
-     * para confirmar se o status consta de fato como CONCLUIDA no banco antes de dar baixa.
+     * Alias de get_access_token() para compatibilidade
+     *
+     * @return string
+     * @throws Exception
+     */
+    public function get_token()
+    {
+        return $this->get_access_token();
+    }
+
+    /**
+     * 2. Dupla Checagem Ativa Anti-Fraude (GET /v1/cob/{txid})
+     * Consulta diretamente a API Cora autenticada com certificados mTLS
+     * para comprovar o status real da cobrança antes de efetivar qualquer baixa.
      *
      * @param string $txid Identificador da cobrança Pix
-     * @return array|null Dados da cobrança na API Cora ou null se erro
+     * @return array|false Dados da cobrança ou false em caso de falha/rejeição
      */
-    public function get_charge($txid)
+    public function consultar_cobranca($txid)
     {
         try {
             $token = $this->get_access_token();
-            $certs = $this->sync_certificates();
+            if (!$token) {
+                return false;
+            }
 
-            $url = $this->get_base_url() . '/v1/cob/' . urlencode($txid);
+            $paths = $this->get_cert_paths();
+            $ch = curl_init($this->get_base_url() . '/v1/cob/' . urlencode($txid));
 
-            $ch = curl_init();
             curl_setopt_array($ch, [
-                CURLOPT_URL            => $url,
-                CURLOPT_HTTPGET        => true,
                 CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_SSLCERT        => $certs['cert'],
-                CURLOPT_SSLKEY         => $certs['key'],
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_HTTPGET        => true,
                 CURLOPT_HTTPHEADER     => [
                     'Authorization: Bearer ' . $token,
                     'Accept: application/json',
                 ],
-                CURLOPT_TIMEOUT        => 30,
+                CURLOPT_SSLCERT        => $paths['cert'],
+                CURLOPT_SSLKEY         => $paths['key'],
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_TIMEOUT        => 15,
             ]);
 
-            $response = curl_exec($ch);
+            $res = curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $curlError = curl_error($ch);
             curl_close($ch);
 
             if ($curlError) {
-                log_activity('Anti-Fraude Cora: Falha de conexão cURL ao consultar txid ' . $txid . ': ' . $curlError);
-                return null;
+                log_activity('Anti-Fraude Cora: Falha cURL ao consultar txid ' . $txid . ': ' . $curlError);
+                return false;
             }
 
-            if ($httpCode === 200) {
-                return json_decode($response, true);
-            }
-
-            log_activity('Anti-Fraude Cora: Cobrança não retornou 200 (HTTP ' . $httpCode . '): ' . $response);
-            return null;
+            return ($httpCode === 200) ? json_decode($res, true) : false;
         } catch (Exception $e) {
             log_activity('Anti-Fraude Cora: Exceção ao consultar txid ' . $txid . ': ' . $e->getMessage());
-            return null;
+            return false;
         }
+    }
+
+    /**
+     * Alias para consultar_cobranca($txid)
+     */
+    public function get_charge($txid)
+    {
+        return $this->consultar_cobranca($txid);
     }
 
     /**
      * Cria uma cobrança imediata via Pix (PUT /v1/cob/{txid})
      *
      * @param object $invoice Objeto da fatura do Perfex CRM
-     * @param float $amount Valor a ser cobrado (saldo restante ou parcial)
+     * @param float $amount Valor a ser cobrado
      * @return array Dados da transação criada com txid e pix_copia_cola
      * @throws Exception
      */
@@ -309,18 +437,14 @@ class Pix_cora_gateway extends App_gateway
             throw new Exception('Chave Pix não configurada nas configurações do gateway.');
         }
 
-        // Cenário 1: Validação prévia de CPF / CNPJ do Pagador
-        $vat = '';
-        if (isset($invoice->client->vat) && !empty($invoice->client->vat)) {
-            $vat = preg_replace('/\D/', '', $invoice->client->vat);
-        }
-
-        if (empty($vat) || (strlen($vat) !== 11 && strlen($vat) !== 14)) {
-            throw new Exception('CPF ou CNPJ válido do pagador não encontrado no cadastro do cliente. O Banco Cora exige o documento fiscal para emissão do Pix.');
+        // Validação Fiscal: Cliente sem Documento
+        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
+            throw new Exception('O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Pix.');
         }
 
         $token = $this->get_access_token();
-        $certs = $this->sync_certificates();
+        $certs = $this->get_cert_paths();
 
         // Geração de txid alfanumérico único entre 26 e 35 caracteres
         $txid = 'CORA' . date('YmdHis') . strtoupper(substr(bin2hex(random_bytes(6)), 0, 12));
@@ -338,7 +462,6 @@ class Pix_cora_gateway extends App_gateway
         $expirationMinutes = (int)($this->getSetting('expiration_minutes') ?: 1440);
         $expirationSeconds = $expirationMinutes * 60;
 
-        // Cenário 4: Valor enviado à Cora é rigorosamente o $amount (saldo restante / pagamento parcial)
         $payload = [
             'calendario' => [
                 'expiracao' => $expirationSeconds,
@@ -353,11 +476,10 @@ class Pix_cora_gateway extends App_gateway
             'solicitacaoPagador' => 'Fatura #' . format_invoice_number($invoice->id),
         ];
 
-        // Se 14 dígitos é CNPJ, se 11 dígitos é CPF
-        if (strlen($vat) === 14) {
-            $payload['devedor']['cnpj'] = $vat;
+        if (strlen($doc) === 14) {
+            $payload['devedor']['cnpj'] = $doc;
         } else {
-            $payload['devedor']['cpf'] = $vat;
+            $payload['devedor']['cpf'] = $doc;
         }
 
         $url = $this->get_base_url() . '/v1/cob/' . $txid;
@@ -437,38 +559,25 @@ class Pix_cora_gateway extends App_gateway
     public function process_payment($data)
     {
         $invoice = $data['invoice'];
-        // Cenário 4: Garantir que o valor utilizado seja $data['amount'] (saldo restante ou parcial)
         $amount  = (float)$data['amount'];
 
-        // Cenário 2: Validação de moeda da fatura (apenas BRL é suportado no Pix Bacen)
-        $currencyName = '';
-        if (isset($invoice->currency_name) && !empty($invoice->currency_name)) {
-            $currencyName = $invoice->currency_name;
-        } elseif (isset($invoice->currency)) {
-            $currencyObj = get_currency($invoice->currency);
-            if ($currencyObj && isset($currencyObj->name)) {
-                $currencyName = $currencyObj->name;
-            }
-        }
-        if (!empty($currencyName) && strtoupper(trim($currencyName)) !== 'BRL') {
-            set_alert('warning', 'O pagamento via Pix está disponível exclusivamente para faturas na moeda BRL (Real).');
+        // 4. Bloqueio de Moeda Estrangeira: O Pix opera exclusivamente em BRL
+        if ($invoice->currency_name !== 'BRL') {
+            set_alert('warning', 'O Pix está disponível apenas para faturas emitidas em BRL (R$).');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;
         }
 
-        // Cenário 1: Cliente sem CPF/CNPJ cadastrado
-        $vat = '';
-        if (isset($invoice->client->vat) && !empty($invoice->client->vat)) {
-            $vat = preg_replace('/\D/', '', $invoice->client->vat);
-        }
-        if (empty($vat) || (strlen($vat) !== 11 && strlen($vat) !== 14)) {
-            set_alert('warning', 'O cliente desta fatura não possui um CPF (11 dígitos) ou CNPJ (14 dígitos) válido cadastrado. O Banco Cora exige o documento do pagador para emitir o Pix.');
+        // 4. Validação Fiscal: Cliente sem Documento (CPF 11 ou CNPJ 14)
+        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
+            set_alert('danger', 'O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Pix.');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;
         }
 
         try {
-            // Verifica se já existe uma transação Pix ATIVA com o mesmo valor gerada recentemente
+            // Verifica se já existe uma transação Pix ATIVA recente para o mesmo valor
             $this->ci->db->where('invoice_id', $invoice->id);
             $this->ci->db->where('status', 'ATIVA');
             $this->ci->db->where('amount', $amount);
@@ -477,7 +586,6 @@ class Pix_cora_gateway extends App_gateway
 
             if ($existing) {
                 $createdAt = strtotime($existing->created_at);
-                // Reutiliza se tiver menos de 12 horas
                 if ((time() - $createdAt) < (12 * 3600)) {
                     redirect(site_url('pix_cora/pix/pay/' . $invoice->id . '/' . $existing->txid));
                     return;
