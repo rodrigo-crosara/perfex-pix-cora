@@ -166,8 +166,11 @@ class Cora_boleto_gateway extends App_gateway
             $existente = $this->ci->db->where('invoice_id', $invoice->id)
                 ->where('type', 'BOLETO')
                 ->where('status', 'PENDING')
+                ->order_by('id', 'DESC')
                 ->get(db_prefix() . 'cora_transactions')
                 ->row();
+
+            $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
 
             // Se já existe e a URL do PDF está salva, valida se o vencimento original ainda é válido
             if ($existente && !empty($existente->pdf_url)) {
@@ -176,7 +179,6 @@ class Cora_boleto_gateway extends App_gateway
 
                 // Se a fatura venceu após a emissão do boleto anterior, emite um novo atualizado
                 if (strtotime($vencimento) >= strtotime($hoje)) {
-                    $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
                     if ($redirectMode === 'pdf') {
                         redirect($existente->pdf_url);
                     } else {
@@ -222,7 +224,7 @@ class Cora_boleto_gateway extends App_gateway
                 return;
             }
 
-            redirect(site_url('cora_payments/cora/boleto/' . $invoice->id . '/' . $boleto['txid']));
+            redirect(site_url('cora_payments/cora/boleto/' . $invoice->id . '/' . $txid));
         } catch (Exception $e) {
             log_activity('Falha na emissão de Boleto Cora para Fatura #' . $invoice->id . ': ' . $e->getMessage());
             set_alert('danger', 'Não foi possível gerar o Boleto Bancário: ' . $e->getMessage());

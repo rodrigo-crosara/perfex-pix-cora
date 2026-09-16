@@ -84,19 +84,19 @@ if ($CI->db->table_exists($legacyTable)) {
 // 3. Estrutura e Blindagem de Segurança do Diretório de Certificados mTLS
 $certsDir = module_dir_path('cora_payments', 'certs');
 if (!is_dir($certsDir)) {
-    @mkdir($certsDir, 0750, true);
+    @mkdir($certsDir, 0700, true);
 } else {
-    @chmod($certsDir, 0750);
+    @chmod($certsDir, 0700);
 }
 
-// Atualiza permissões de leitura dos certificados caso já existam em disco (0640 para compatibilidade PHP-FPM)
+// Atualiza permissões estritas de leitura dos certificados (0600 - Padrão de Segurança Financeira)
 $certFile = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'cora_cert.pem';
 $keyFile  = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'cora_key.key';
 if (file_exists($certFile)) {
-    @chmod($certFile, 0640);
+    @chmod($certFile, 0600);
 }
 if (file_exists($keyFile)) {
-    @chmod($keyFile, 0640);
+    @chmod($keyFile, 0600);
 }
 
 // Grava .htaccess para Apache/LiteSpeed
@@ -104,6 +104,12 @@ $htaccessPath = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . '.htaccess';
 if (!file_exists($htaccessPath)) {
     $htaccessContent = "<IfModule authz_core_module>\n    Require all denied\n</IfModule>\n<IfModule !authz_core_module>\n    Deny from all\n</IfModule>\n";
     @file_put_contents($htaccessPath, $htaccessContent);
+}
+
+// Grava web.config para IIS/Windows Server
+$webConfigPath = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'web.config';
+if (!file_exists($webConfigPath)) {
+    @file_put_contents($webConfigPath, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n  <system.webServer>\n    <authorization>\n      <deny users=\"*\" />\n    </authorization>\n  </system.webServer>\n</configuration>\n");
 }
 
 // Grava index.html e index.php para blindagem contra Nginx e outros web servers
@@ -117,34 +123,14 @@ if (!file_exists($indexPhpPath)) {
     @file_put_contents($indexPhpPath, "<?php\ndefined('BASEPATH') or exit('No direct script access allowed');\nheader('HTTP/1.1 403 Forbidden');\nexit('Access denied.');\n");
 }
 
-// 4. Endpoint Proxy Liberado Nativamente de CSRF pelo Perfex CRM
-// O Perfex CRM mantém a rota 'gateways/.*' liberada de CSRF por padrão em todas as instalações.
-// Cria o controller proxy leve em application/controllers/gateways/Cora.php
+// 4. Limpeza de Proxy Legado (Prevenção Definitiva de Colisão de Classes)
+// O CodeIgniter e o Perfex CRM resolvem o webhook nativamente via config/routes.php
+// com isenção nativa global de CSRF para 'gateways/.*'. Não é necessário proxy em APPPATH.
 if (defined('APPPATH')) {
-    $gateways_dir = APPPATH . 'controllers/gateways';
-    $proxy_file   = $gateways_dir . '/Cora.php';
-
-    if (is_dir($gateways_dir) && is_writable($gateways_dir)) {
-        $proxy_code = '<?php
-defined("BASEPATH") or exit("No direct script access allowed");
-
-/**
- * Gateway Webhook Proxy Oficial - Cora Payments
- * Rota isenta nativamente de CSRF pelo Perfex CRM: /gateways/cora/webhook
- */
-class Cora extends App_Controller
-{
-    public function webhook()
-    {
-        require_once(module_dir_path("cora_payments", "controllers/Cora.php"));
-        $controller = class_exists("Cora_gateway_controller", false) ? new Cora_gateway_controller() : new Cora();
-        $controller->webhook();
+    $legacyProxy = APPPATH . 'controllers/gateways/Cora.php';
+    if (file_exists($legacyProxy)) {
+        @unlink($legacyProxy);
     }
 }
-';
-        if (!file_exists($proxy_file) || (file_exists($proxy_file) && strpos(@file_get_contents($proxy_file), 'cora_payments') !== false)) {
-            @file_put_contents($proxy_file, $proxy_code);
-        }
-    }
-}
+
 

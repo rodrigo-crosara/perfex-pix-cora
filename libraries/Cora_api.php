@@ -121,6 +121,7 @@ class Cora_api
         if (!is_dir($certsDir)) {
             @mkdir($certsDir, 0700, true);
             @file_put_contents($certsDir . DIRECTORY_SEPARATOR . '.htaccess', "<IfModule authz_core_module>\n    Require all denied\n</IfModule>\n<IfModule !authz_core_module>\n    Deny from all\n</IfModule>\n");
+            @file_put_contents($certsDir . DIRECTORY_SEPARATOR . 'web.config', "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n  <system.webServer>\n    <authorization>\n      <deny users=\"*\" />\n    </authorization>\n  </system.webServer>\n</configuration>\n");
             @file_put_contents($certsDir . DIRECTORY_SEPARATOR . 'index.html', '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body><p>Directory access is forbidden.</p></body></html>');
             @file_put_contents($certsDir . DIRECTORY_SEPARATOR . 'index.php', "<?php\ndefined('BASEPATH') or exit('No direct script access allowed');\nheader('HTTP/1.1 403 Forbidden');\nexit('Access denied.');\n");
         }
@@ -168,19 +169,19 @@ class Cora_api
             throw new Exception('Certificado mTLS (.pem) ou Chave Privada (.key) não configurados nas opções do gateway Cora Payments.');
         }
 
-        // Sincronização inteligente com verificação de hash MD5 (evita gravação em disco se idêntico)
+        // Sincronização inteligente com verificação de hash MD5 (permissão estrita 0600)
         if (!file_exists($certFile) || md5_file($certFile) !== md5($certContent)) {
             @file_put_contents($certFile, $certContent);
-            @chmod($certFile, 0640);
+            @chmod($certFile, 0600);
         } else {
-            @chmod($certFile, 0640);
+            @chmod($certFile, 0600);
         }
 
         if (!file_exists($keyFile) || md5_file($keyFile) !== md5($keyContent)) {
             @file_put_contents($keyFile, $keyContent);
-            @chmod($keyFile, 0640);
+            @chmod($keyFile, 0600);
         } else {
-            @chmod($keyFile, 0640);
+            @chmod($keyFile, 0600);
         }
 
         return ['cert' => $certFile, 'key' => $keyFile];
@@ -516,21 +517,41 @@ class Cora_api
             $clientName = 'Cliente Fatura #' . $invoice->id;
         }
 
-        // Email do cliente
+        // 1. Obter e-mail real do cliente no Perfex CRM (armazena em tblcontacts)
         $clientEmail = '';
-        if (isset($invoice->client->email) && !empty($invoice->client->email)) {
-            $clientEmail = trim($invoice->client->email);
-        } else {
-            // Tenta obter email do contato principal
-            if (isset($invoice->clientid)) {
-                $primaryContact = $this->ci->clients_model->get_contact(get_primary_contact_user_id($invoice->clientid));
+        $primaryContact = null;
+        $clientId = $invoice->clientid ?? ($invoice->client->userid ?? null);
+
+        if ($clientId) {
+            $this->ci->load->model('clients_model');
+            $primaryContactId = get_primary_contact_user_id($clientId);
+
+            if ($primaryContactId) {
+                $primaryContact = $this->ci->clients_model->get_contact($primaryContactId);
                 if ($primaryContact && !empty($primaryContact->email)) {
                     $clientEmail = trim($primaryContact->email);
                 }
             }
+
+            // Fallback caso não haja contato primário explicitamente definido
+            if (empty($clientEmail)) {
+                $contact = $this->ci->db->where('userid', $clientId)
+                                        ->order_by('is_primary', 'DESC')
+                                        ->get(db_prefix() . 'contacts')
+                                        ->row();
+                if ($contact && !empty($contact->email)) {
+                    $clientEmail = trim($contact->email);
+                    if (!$primaryContact) {
+                        $primaryContact = $contact;
+                    }
+                }
+            }
         }
+
+        // Fallback secundário
         if (empty($clientEmail)) {
-            $clientEmail = 'financeiro@' . (!empty($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'cora.com.br');
+            $hostDomain = !empty($_SERVER['HTTP_HOST']) ? preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST']) : 'cora.com.br';
+            $clientEmail = 'financeiro@' . $hostDomain;
         }
 
         // 2. Telefone higienizado para a Régua do WhatsApp da Cora
@@ -656,9 +677,26 @@ class Cora_api
         $resJson = json_decode($response, true);
 
         if ($httpCode !== 200 && $httpCode !== 201) {
-            $msg = $resJson['message'] ?? ($resJson['detail'] ?? ($resJson['errors'][0]['message'] ?? 'Erro desconhecido na emissão de boleto Cora'));
+            $msg = 'Erro desconhecido na emissão de boleto Cora';
+            if (!empty($resJson['message'])) {
+                $msg = $resJson['message'];
+            } elseif (!empty($resJson['detail'])) {
+                $msg = $resJson['detail'];
+            } elseif (!empty($resJson['errors']) && is_array($resJson['errors'])) {
+                $errList = [];
+                foreach ($resJson['errors'] as $errItem) {
+                    if (is_array($errItem)) {
+                        $field = $errItem['field'] ?? '';
+                        $m     = $errItem['message'] ?? json_encode($errItem);
+                        $errList[] = !empty($field) ? ($field . ': ' . $m) : $m;
+                    } else {
+                        $errList[] = (string)$errItem;
+                    }
+                }
+                $msg = implode('; ', $errList);
+            }
             log_activity('Erro API Cora Boleto (HTTP ' . $httpCode . '): ' . $response);
-            throw new Exception('Banco Cora rejeitou a emissão do boleto: ' . $msg);
+            throw new Exception('Banco Cora rejeitou a emissão do boleto (' . $httpCode . '): ' . $msg);
         }
 
         // 1 & 3. Extrai dados retornados pela Cora com encadeamento resiliente e txid único baseado no ID da Cora

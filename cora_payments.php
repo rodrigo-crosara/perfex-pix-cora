@@ -41,7 +41,7 @@ function cora_payments_gateways_init()
  * 1. Exceção de CSRF no Webhook (CodeIgniter)
  * Desativa a checagem de CSRF para requisições de webhook enviadas pelo Banco Cora.
  */
-hooks()->add_action('pre_system', function () {
+hooks()->add_action('app_init', function () {
     $CI = &get_instance();
     if (isset($CI->config)) {
         $whitelist = $CI->config->item('csrf_exclude_uris');
@@ -60,6 +60,9 @@ hooks()->add_action('pre_system', function () {
         $whitelist[] = 'cora_payments/webhook/';
         $whitelist[] = 'cora_payments/webhook/.*';
         $whitelist[] = 'cora_payments/webhook/*';
+        $whitelist[] = 'cora_payments/cora';
+        $whitelist[] = 'cora_payments/cora/.*';
+        $whitelist[] = 'cora_payments/cora/*';
         $whitelist[] = 'cora/webhook';
         $whitelist[] = 'cora/webhook/';
         $whitelist[] = 'cora/webhook/.*';
@@ -257,6 +260,7 @@ function cora_cancel_invoice_on_bank($invoice_id)
     $CI = &get_instance();
     $transacao = $CI->db->where('invoice_id', $invoice_id)
         ->where('status', 'PENDING')
+        ->order_by('id', 'DESC')
         ->get(db_prefix() . 'cora_transactions')
         ->row();
 
