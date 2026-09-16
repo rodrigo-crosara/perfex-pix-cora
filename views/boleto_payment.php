@@ -236,10 +236,13 @@
             </div>
 
             <!-- Linha Digitável e Código de Barras -->
-            <?php if (!empty($barcode)) : ?>
+            <?php 
+            $linhaDigitavel = !empty($digitable_line) ? $digitable_line : (!empty($barcode) ? $barcode : '');
+            if (!empty($linhaDigitavel)) : 
+            ?>
             <div class="barcode-box">
-                <div class="amount-label" style="text-align: center; margin-bottom: 8px;">Linha Digitável para Pagamento:</div>
-                <div class="barcode-number" id="barcode-text"><?= html_escape($barcode); ?></div>
+                <div class="amount-label" style="text-align: center; margin-bottom: 8px;">Linha Digitável para Pagamento (Apps e Internet Banking):</div>
+                <div class="barcode-number" id="barcode-text"><?= html_escape($linhaDigitavel); ?></div>
                 <button type="button" id="btn-copy-barcode" class="btn btn-action-secondary">
                     <i class="far fa-copy"></i> Copiar Linha Digitável
                 </button>

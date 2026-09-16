@@ -123,14 +123,13 @@ if (!file_exists($indexPhpPath)) {
     @file_put_contents($indexPhpPath, "<?php\ndefined('BASEPATH') or exit('No direct script access allowed');\nheader('HTTP/1.1 403 Forbidden');\nexit('Access denied.');\n");
 }
 
-// 4. Limpeza de Proxy Legado (Prevenção Definitiva de Colisão de Classes)
-// O CodeIgniter e o Perfex CRM resolvem o webhook nativamente via config/routes.php
-// com isenção nativa global de CSRF para 'gateways/.*'. Não é necessário proxy em APPPATH.
-if (defined('APPPATH')) {
-    $legacyProxy = APPPATH . 'controllers/gateways/Cora.php';
-    if (file_exists($legacyProxy)) {
-        @unlink($legacyProxy);
-    }
+// 4. Proxy Seguro de Roteamento para Webhook (Prevenção Definitiva de 404 e de Colisão de Classes)
+// Garante o funcionamento de gateways/cora/webhook tanto via rotas de módulo quanto por descoberta de controller nativa
+if (defined('APPPATH') && is_dir(APPPATH . 'controllers/gateways')) {
+    $gatewaysDir = APPPATH . 'controllers/gateways' . DIRECTORY_SEPARATOR;
+    $proxyFile   = $gatewaysDir . 'Cora.php';
+    $proxyCode   = "<?php\n\ndefined('BASEPATH') or exit('No direct script access allowed');\n\n/**\n * Proxy Seguro de Roteamento - Cora Payments Webhook\n * Não redeclara a classe Cora caso já tenha sido carregada pelo roteador HMVC.\n */\nif (!class_exists('Cora', false)) {\n    \$moduleController = module_dir_path('cora_payments', 'controllers/Cora.php');\n    if (file_exists(\$moduleController)) {\n        require_once \$moduleController;\n    }\n}\n";
+    @file_put_contents($proxyFile, $proxyCode);
 }
 
 

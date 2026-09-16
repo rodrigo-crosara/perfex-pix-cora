@@ -138,9 +138,27 @@ class Cora_api
      */
     public function get_cert_paths($gateway = 'cora_pix')
     {
-        $certsDir = $this->get_certs_dir();
-        $certFile = $certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem';
-        $keyFile  = $certsDir . DIRECTORY_SEPARATOR . 'cora_key.key';
+        $clientId   = $this->get_credential('client_id', $gateway);
+        $salt       = defined('ENVIRONMENT') ? config_item('encryption_key') : 'cora_payments_mtls';
+        $uniqueHash = md5($clientId . '_' . $salt);
+
+        // Opção B (Elegante & Imune ao Nginx): Armazena fora da raiz web no diretório temporário do sistema
+        $systemTemp = rtrim(sys_get_temp_dir(), '/\\');
+        $targetDir  = $systemTemp . DIRECTORY_SEPARATOR . 'cora_certs_' . $uniqueHash;
+
+        if (!is_dir($targetDir)) {
+            @mkdir($targetDir, 0700, true);
+        }
+
+        // Se o diretório do sistema não puder ser criado ou não tiver permissão de escrita, utiliza a pasta certs do módulo como fallback
+        if (!is_dir($targetDir) || !is_writable($targetDir)) {
+            $targetDir = $this->get_certs_dir();
+        } else {
+            @chmod($targetDir, 0700);
+        }
+
+        $certFile = $targetDir . DIRECTORY_SEPARATOR . 'cora_cert.pem';
+        $keyFile  = $targetDir . DIRECTORY_SEPARATOR . 'cora_key.key';
 
         $certContent = trim($this->get_credential('cert_content', $gateway));
         $keyContent  = trim($this->get_credential('key_content', $gateway));
@@ -165,6 +183,13 @@ class Cora_api
         if (empty($certContent) || empty($keyContent)) {
             if (file_exists($certFile) && file_exists($keyFile)) {
                 return ['cert' => $certFile, 'key' => $keyFile];
+            }
+            // Fallback nos arquivos locais da pasta certs/ do módulo
+            $moduleCertsDir = $this->get_certs_dir();
+            $modCert = $moduleCertsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem';
+            $modKey  = $moduleCertsDir . DIRECTORY_SEPARATOR . 'cora_key.key';
+            if (file_exists($modCert) && file_exists($modKey)) {
+                return ['cert' => $modCert, 'key' => $modKey];
             }
             throw new Exception('Certificado mTLS (.pem) ou Chave Privada (.key) não configurados nas opções do gateway Cora Payments.');
         }
@@ -707,16 +732,20 @@ class Cora_api
                   ?? ($resJson['bank_slip']['url'] 
                   ?? null);
 
-        $barcode = $resJson['payment_options']['bank_slip']['digitable_line'] 
-                   ?? ($resJson['payment_options']['bank_slip']['barcode'] 
-                   ?? ($resJson['bank_slip']['digitable_line'] 
-                   ?? ($resJson['bank_slip']['barcode'] 
-                   ?? ($resJson['barcode'] 
-                   ?? null))));
+        // Prioridade máxima: Linha Digitável formatada (47 dígitos) para digitação/cópia em internet banking e apps
+        $digitableLine = $resJson['payment_options']['bank_slip']['digitable_line'] 
+                         ?? ($resJson['bank_slip']['digitable_line'] 
+                         ?? ($resJson['digitable_line'] 
+                         ?? null));
 
-        $digitable = $resJson['payment_options']['bank_slip']['digitable_line'] 
-                   ?? ($resJson['bank_slip']['digitable_line'] 
-                   ?? $barcode);
+        // Código de barras óptico contínuo (44 dígitos)
+        $rawBarcode = $resJson['payment_options']['bank_slip']['barcode'] 
+                      ?? ($resJson['bank_slip']['barcode'] 
+                      ?? ($resJson['barcode'] 
+                      ?? null));
+
+        // O campo barcode salvo e exibido para cópia prioriza estritamente a linha digitável (47 dígitos)
+        $barcode = !empty($digitableLine) ? $digitableLine : $rawBarcode;
 
         $pixCopiaECola = $resJson['payment_options']['pix']['emv'] 
                          ?? ($resJson['payment_options']['pix']['qrcode'] 
@@ -732,7 +761,8 @@ class Cora_api
             'txid'            => $txid,
             'cora_invoice_id' => $coraInvoiceId,
             'barcode'         => $barcode,
-            'digitable_line'  => $digitable,
+            'digitable_line'  => !empty($digitableLine) ? $digitableLine : $barcode,
+            'raw_barcode'     => $rawBarcode,
             'pdf_url'         => $pdfUrl,
             'pix_copia_cola'  => $pixCopiaECola,
             'amount'          => (float)$amount,

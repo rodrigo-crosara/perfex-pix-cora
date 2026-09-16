@@ -155,7 +155,7 @@ class Cora_pix_gateway extends App_gateway
                 $createdAt = strtotime($existing->created_at);
                 $expMinutes = (int)($this->getSetting('expiration_minutes') ?: 1440);
                 if ((time() - $createdAt) < ($expMinutes * 60)) {
-                    redirect(site_url('cora_payments/cora/pay/' . $invoice->id . '/' . $existing->txid));
+                    redirect(site_url('cora_payments/cora/pay/' . $invoice->id . '/' . $invoice->hash . '/' . $existing->txid));
                     return;
                 }
             }
@@ -176,7 +176,7 @@ class Cora_pix_gateway extends App_gateway
             ]);
 
             set_alert('success', 'Código Pix gerado com sucesso! Efetue o pagamento via QR Code ou Copia e Cola.');
-            redirect(site_url('cora_payments/cora/pay/' . $invoice->id . '/' . $pixData['txid']));
+            redirect(site_url('cora_payments/cora/pay/' . $invoice->id . '/' . $invoice->hash . '/' . $pixData['txid']));
         } catch (Exception $e) {
             log_activity('Falha no processamento Pix Cora para Fatura #' . $invoice->id . ': ' . $e->getMessage());
             set_alert('danger', 'Não foi possível gerar a cobrança Pix: ' . $e->getMessage());

@@ -29,25 +29,83 @@ class Cora extends App_Controller
     }
 
     /**
-     * Tela de pagamento Pix com QR Code dinâmico e código Copia e Cola
+     * Resolve parâmetros da rota pública suportando formatos com hash ou legados:
+     * - Formato Seguro: ($invoice_id, $hash, $txid)
+     * - Formato Legado: ($invoice_id, $txid, null)
      *
      * @param int|string $invoice_id
-     * @param string $txid
+     * @param string|null $hash_or_txid
+     * @param string|null $txid
+     * @return array [$invoice_id, $hash, $txid]
      */
-    public function pay($invoice_id = null, $txid = null)
+    protected function resolve_route_params($invoice_id, $hash_or_txid = null, $txid = null)
     {
+        $invoice_id = (int)$invoice_id;
+        $hash       = null;
+        $cleanTxid  = null;
+
+        if (!empty($txid)) {
+            $hash      = (string)$hash_or_txid;
+            $cleanTxid = (string)$txid;
+        } else {
+            $cleanTxid = (string)$hash_or_txid;
+        }
+
+        return [$invoice_id, $hash, $cleanTxid];
+    }
+
+    /**
+     * Valida as restrições de acesso à fatura usando a função nativa do Perfex CRM
+     * e o hash de segurança para prevenir IDOR e enumeração de dados de clientes.
+     *
+     * @param int $invoice_id
+     * @param string|null $hash
+     * @return object
+     */
+    protected function validate_invoice_access($invoice_id, $hash = null)
+    {
+        if (empty($invoice_id)) {
+            show_404();
+            exit;
+        }
+
+        $invoice = $this->invoices_model->get((int)$invoice_id);
+        if (!$invoice) {
+            show_404();
+            exit;
+        }
+
+        // Se o hash foi fornecido na URL, aplica check_invoice_restrictions nativo do Perfex CRM
+        if (!empty($hash)) {
+            if (function_exists('check_invoice_restrictions')) {
+                check_invoice_restrictions($invoice->id, $hash);
+            } elseif ($invoice->hash !== $hash) {
+                show_404();
+                exit;
+            }
+        }
+
+        return $invoice;
+    }
+
+    /**
+     * Tela de pagamento Pix com QR Code dinâmico e código Copia e Cola
+     * Protegido contra enumeração de faturas (IDOR) via hash
+     *
+     * @param int|string $invoice_id
+     * @param string|null $hash_or_txid
+     * @param string|null $txid
+     */
+    public function pay($invoice_id = null, $hash_or_txid = null, $txid = null)
+    {
+        list($invoice_id, $hash, $txid) = $this->resolve_route_params($invoice_id, $hash_or_txid, $txid);
+
         if (empty($invoice_id) || empty($txid)) {
             show_404();
             return;
         }
 
-        $invoice_id = (int)$invoice_id;
-        $invoice    = $this->invoices_model->get($invoice_id);
-
-        if (!$invoice) {
-            show_404();
-            return;
-        }
+        $invoice = $this->validate_invoice_access($invoice_id, $hash);
 
         $statusDraft = defined('Invoices_model::STATUS_DRAFT') ? Invoices_model::STATUS_DRAFT : 6;
         if ((int)$invoice->status === (int)$statusDraft) {
@@ -90,7 +148,7 @@ class Cora extends App_Controller
             'txid'             => $txid,
             'pix_copia_cola'   => $transaction->pix_copia_cola,
             'amount'           => $amountToPay,
-            'check_status_url' => site_url('cora_payments/cora/check_status/' . $invoice->id . '/' . $txid),
+            'check_status_url' => site_url('cora_payments/cora/check_status/' . $invoice->id . '/' . $invoice->hash . '/' . $txid),
             'invoice_url'      => site_url('invoice/' . $invoice->id . '/' . $invoice->hash),
         ];
 
@@ -99,24 +157,22 @@ class Cora extends App_Controller
 
     /**
      * Tela de exibição de Boleto Bancário Híbrido (com opção de download, linha digitável e Pix)
+     * Protegido contra enumeração de faturas (IDOR) via hash
      *
      * @param int|string $invoice_id
-     * @param string $txid
+     * @param string|null $hash_or_txid
+     * @param string|null $txid
      */
-    public function boleto($invoice_id = null, $txid = null)
+    public function boleto($invoice_id = null, $hash_or_txid = null, $txid = null)
     {
+        list($invoice_id, $hash, $txid) = $this->resolve_route_params($invoice_id, $hash_or_txid, $txid);
+
         if (empty($invoice_id) || empty($txid)) {
             show_404();
             return;
         }
 
-        $invoice_id = (int)$invoice_id;
-        $invoice    = $this->invoices_model->get($invoice_id);
-
-        if (!$invoice) {
-            show_404();
-            return;
-        }
+        $invoice = $this->validate_invoice_access($invoice_id, $hash);
 
         $this->db->where('invoice_id', $invoice_id);
         $this->db->where('txid', $txid);
@@ -150,10 +206,11 @@ class Cora extends App_Controller
             'transaction'      => $transaction,
             'txid'             => $txid,
             'barcode'          => $transaction->barcode,
+            'digitable_line'   => $transaction->barcode,
             'pdf_url'          => $transaction->pdf_url,
             'pix_copia_cola'   => $transaction->pix_copia_cola,
             'amount'           => $amountToPay,
-            'check_status_url' => site_url('cora_payments/cora/check_status/' . $invoice->id . '/' . $txid),
+            'check_status_url' => site_url('cora_payments/cora/check_status/' . $invoice->id . '/' . $invoice->hash . '/' . $txid),
             'invoice_url'      => site_url('invoice/' . $invoice->id . '/' . $invoice->hash),
         ];
 
@@ -164,25 +221,31 @@ class Cora extends App_Controller
      * Alias para visualização do boleto bancário (boleto_view)
      *
      * @param int|string $invoice_id
-     * @param string $txid
+     * @param string|null $hash_or_txid
+     * @param string|null $txid
      */
-    public function boleto_view($invoice_id = null, $txid = null)
+    public function boleto_view($invoice_id = null, $hash_or_txid = null, $txid = null)
     {
-        return $this->boleto($invoice_id, $txid);
+        return $this->boleto($invoice_id, $hash_or_txid, $txid);
     }
 
     /**
      * Download seguro do PDF do Boleto Oficial da Cora
      *
      * @param int|string $invoice_id
-     * @param string $txid
+     * @param string|null $hash_or_txid
+     * @param string|null $txid
      */
-    public function download_boleto($invoice_id = null, $txid = null)
+    public function download_boleto($invoice_id = null, $hash_or_txid = null, $txid = null)
     {
+        list($invoice_id, $hash, $txid) = $this->resolve_route_params($invoice_id, $hash_or_txid, $txid);
+
         if (empty($invoice_id) || empty($txid)) {
             show_404();
             return;
         }
+
+        $this->validate_invoice_access($invoice_id, $hash);
 
         $this->db->where('invoice_id', (int)$invoice_id);
         $this->db->where('txid', $txid);
@@ -205,37 +268,23 @@ class Cora extends App_Controller
     /**
      * Endpoint de Polling assíncrono para telas de pagamento (Pix e Boleto)
      * Retorna JSON indicando se o pagamento já foi compensado e URL de retorno.
-     * Exige estritamente a combinação invoice_id e txid para prevenir BOLA/Enumeração de hash.
+     * Exige estritamente a combinação invoice_id, hash (se fornecido) e txid para prevenir BOLA/IDOR.
      *
      * @param int|string $invoice_id
-     * @param string $txid
+     * @param string|null $hash_or_txid
+     * @param string|null $txid
      */
-    public function check_status($invoice_id = null, $txid = null)
+    public function check_status($invoice_id = null, $hash_or_txid = null, $txid = null)
     {
         header('Content-Type: application/json; charset=utf-8');
+
+        list($invoice_id, $hash, $txid) = $this->resolve_route_params($invoice_id, $hash_or_txid, $txid);
 
         if (empty($invoice_id) || empty($txid)) {
             set_status_header(400);
             echo json_encode([
                 'paid'  => false,
                 'error' => 'Parâmetros obrigatórios ausentes (invoice_id e txid são requeridos).',
-            ]);
-            exit;
-        }
-
-        $invoice_id = (int)$invoice_id;
-
-        // 1. Busca estrita da transação vinculada à fatura e txid informados
-        $transacao = $this->db->where('txid', $txid)
-                              ->where('invoice_id', $invoice_id)
-                              ->get(db_prefix() . 'cora_transactions')
-                              ->row();
-
-        if (!$transacao) {
-            set_status_header(404);
-            echo json_encode([
-                'paid'  => false,
-                'error' => 'Transação não localizada para esta fatura.',
             ]);
             exit;
         }
@@ -248,6 +297,31 @@ class Cora extends App_Controller
             echo json_encode([
                 'paid'  => false,
                 'error' => 'Fatura não encontrada.',
+            ]);
+            exit;
+        }
+
+        // Se o hash foi fornecido, valida contra acesso indevido/IDOR
+        if (!empty($hash) && $invoice->hash !== $hash) {
+            set_status_header(403);
+            echo json_encode([
+                'paid'  => false,
+                'error' => 'Acesso não autorizado para esta fatura.',
+            ]);
+            exit;
+        }
+
+        // 1. Busca estrita da transação vinculada à fatura e txid informados
+        $transacao = $this->db->where('txid', $txid)
+                              ->where('invoice_id', $invoice_id)
+                              ->get(db_prefix() . 'cora_transactions')
+                              ->row();
+
+        if (!$transacao) {
+            set_status_header(404);
+            echo json_encode([
+                'paid'  => false,
+                'error' => 'Transação não localizada para esta fatura.',
             ]);
             exit;
         }
@@ -399,6 +473,16 @@ class Cora extends App_Controller
         // CENÁRIO B: Notificação de Boleto (Cora v2)
         // =========================================================================
         $event = $payload['event_type'] ?? ($payload['event'] ?? ($headerEventType ?? ''));
+
+        // Suporte ao teste de fogo e pings de webhook (Ex: test.ping, ping, endpoint.test)
+        if (in_array($event, ['test.ping', 'ping', 'endpoint.test'])) {
+            log_activity('Cora Payments Webhook: Teste de conectividade recebido com sucesso (' . $event . ')');
+            set_status_header(200);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['status' => 'success', 'message' => 'Webhook endpoint operational']);
+            return;
+        }
+
         if (in_array($event, ['invoice.paid', 'INVOICE_PAID'])) {
             $this->load->library('cora_payments/cora_boleto_gateway');
             $cora_id = $payload['data']['id'] ?? ($payload['resource']['id'] ?? ($headerResourceId ?? ($payload['id'] ?? '')));

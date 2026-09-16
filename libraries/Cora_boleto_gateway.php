@@ -182,7 +182,7 @@ class Cora_boleto_gateway extends App_gateway
                     if ($redirectMode === 'pdf') {
                         redirect($existente->pdf_url);
                     } else {
-                        redirect(site_url('cora_payments/cora/boleto_view/' . $invoice->id . '/' . $existente->txid));
+                        redirect(site_url('cora_payments/cora/boleto_view/' . $invoice->id . '/' . $invoice->hash . '/' . $existente->txid));
                     }
                     return;
                 }
@@ -224,7 +224,7 @@ class Cora_boleto_gateway extends App_gateway
                 return;
             }
 
-            redirect(site_url('cora_payments/cora/boleto/' . $invoice->id . '/' . $txid));
+            redirect(site_url('cora_payments/cora/boleto/' . $invoice->id . '/' . $invoice->hash . '/' . $txid));
         } catch (Exception $e) {
             log_activity('Falha na emissão de Boleto Cora para Fatura #' . $invoice->id . ': ' . $e->getMessage());
             set_alert('danger', 'Não foi possível gerar o Boleto Bancário: ' . $e->getMessage());
