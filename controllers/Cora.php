@@ -15,7 +15,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * 4. Polling assíncrono (check_status): Atualização em tempo real na tela do cliente.
  * 5. Teste de Conexão Administrativo (test_connection): Validação instantânea de certificados e OAuth2.
  */
-class Cora extends App_Controller
+class Cora_gateway_controller extends App_Controller
 {
     public function __construct()
     {
@@ -529,3 +529,13 @@ class Cora extends App_Controller
         log_activity('Fatura #' . $transacao->invoice_id . ' liquidada via Boleto Cora (ID: ' . $cora_id . ')');
     }
 }
+
+if (!class_exists('Cora', false)) {
+    /**
+     * Alias de classe para compatibilidade direta quando acessado via rotas do módulo
+     */
+    class Cora extends Cora_gateway_controller
+    {
+    }
+}
+

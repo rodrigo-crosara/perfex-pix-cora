@@ -104,3 +104,35 @@ $indexPhpPath = rtrim($certsDir, '/\\') . DIRECTORY_SEPARATOR . 'index.php';
 if (!file_exists($indexPhpPath)) {
     @file_put_contents($indexPhpPath, "<?php\ndefined('BASEPATH') or exit('No direct script access allowed');\nheader('HTTP/1.1 403 Forbidden');\nexit('Access denied.');\n");
 }
+
+// 4. Endpoint Proxy Liberado Nativamente de CSRF pelo Perfex CRM
+// O Perfex CRM mantém a rota 'gateways/.*' liberada de CSRF por padrão em todas as instalações.
+// Cria o controller proxy leve em application/controllers/gateways/Cora.php
+if (defined('APPPATH')) {
+    $gateways_dir = APPPATH . 'controllers/gateways';
+    $proxy_file   = $gateways_dir . '/Cora.php';
+
+    if (is_dir($gateways_dir) && is_writable($gateways_dir)) {
+        $proxy_code = '<?php
+defined("BASEPATH") or exit("No direct script access allowed");
+
+/**
+ * Gateway Webhook Proxy Oficial - Cora Payments
+ * Rota isenta nativamente de CSRF pelo Perfex CRM: /gateways/cora/webhook
+ */
+class Cora extends App_Controller
+{
+    public function webhook()
+    {
+        require_once(module_dir_path("cora_payments", "controllers/Cora.php"));
+        $controller = class_exists("Cora_gateway_controller", false) ? new Cora_gateway_controller() : new Cora();
+        $controller->webhook();
+    }
+}
+';
+        if (!file_exists($proxy_file) || (file_exists($proxy_file) && strpos(@file_get_contents($proxy_file), 'cora_payments') !== false)) {
+            @file_put_contents($proxy_file, $proxy_code);
+        }
+    }
+}
+

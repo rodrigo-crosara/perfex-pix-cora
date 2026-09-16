@@ -882,25 +882,33 @@ class Cora_api
         }
 
         return [
-            'street'    => mb_substr($street, 0, 100, 'UTF-8') ?: 'Nao informado',
-            'number'    => mb_substr($number, 0, 20, 'UTF-8'),
-            'district'  => 'Centro',
-            'city'      => mb_substr($city, 0, 60, 'UTF-8'),
-            'state'     => $state,
-            'post_code' => $postCode,
+            'street'      => mb_substr($street, 0, 100, 'UTF-8') ?: 'Nao informado',
+            'number'      => mb_substr($number, 0, 20, 'UTF-8'),
+            'district'    => 'Centro',
+            'city'        => mb_substr($city, 0, 60, 'UTF-8'),
+            'state'       => $state,
+            'postal_code' => $postCode, // Chave exata exigida pelo schema da API Cora v2
         ];
     }
 
     /**
-     * Gera um identificador UUID v4 para Idempotency-Key
+     * Gera um identificador UUID v4 único para o header Idempotency-Key
+     * Exigido obrigatoriamente pela API Cora v2 (POST /v2/invoices)
      *
      * @return string
      */
-    protected function generate_uuid()
+    public function generate_uuid()
     {
-        $data = random_bytes(16);
-        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
-        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
-        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+        return sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff)
+        );
     }
 }
