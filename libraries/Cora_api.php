@@ -653,19 +653,30 @@ class Cora_api
             throw new Exception('Banco Cora rejeitou a emissão do boleto: ' . $msg);
         }
 
-        // Extrai dados retornados pela Cora
+        // 1 & 3. Extrai dados retornados pela Cora com encadeamento resiliente e txid único baseado no ID da Cora
         $coraInvoiceId = $resJson['id'] ?? '';
-        $barcode       = $resJson['bank_slip']['barcode'] ?? ($resJson['bank_slip']['digitable_line'] ?? '');
-        $digitable     = $resJson['bank_slip']['digitable_line'] ?? $barcode;
-        $pdfUrl        = $resJson['bank_slip']['url'] ?? '';
+        $txid          = !empty($coraInvoiceId) ? ('BOL_' . $coraInvoiceId) : ('BOL_' . date('YmdHis') . strtoupper(substr(bin2hex(random_bytes(4)), 0, 8)));
 
-        // Pix Copia e Cola embutido no boleto híbrido
-        $pixCopiaECola = '';
-        if (isset($resJson['payment_options']['pix']['emv'])) {
-            $pixCopiaECola = $resJson['payment_options']['pix']['emv'];
-        } elseif (isset($resJson['payment_options']['pix']['qrcode'])) {
-            $pixCopiaECola = $resJson['payment_options']['pix']['qrcode'];
-        }
+        $pdfUrl = $resJson['payment_options']['bank_slip']['url'] 
+                  ?? ($resJson['bank_slip']['url'] 
+                  ?? null);
+
+        $barcode = $resJson['payment_options']['bank_slip']['digitable_line'] 
+                   ?? ($resJson['payment_options']['bank_slip']['barcode'] 
+                   ?? ($resJson['bank_slip']['digitable_line'] 
+                   ?? ($resJson['bank_slip']['barcode'] 
+                   ?? ($resJson['barcode'] 
+                   ?? null))));
+
+        $digitable = $resJson['payment_options']['bank_slip']['digitable_line'] 
+                   ?? ($resJson['bank_slip']['digitable_line'] 
+                   ?? $barcode);
+
+        $pixCopiaECola = $resJson['payment_options']['pix']['emv'] 
+                         ?? ($resJson['payment_options']['pix']['qrcode'] 
+                         ?? ($resJson['pix']['emv'] 
+                         ?? ($resJson['pix']['qrcode'] 
+                         ?? '')));
 
         if (empty($pdfUrl) && empty($barcode)) {
             throw new Exception('O Banco Cora processou a requisição, mas não retornou os dados do boleto bancário.');

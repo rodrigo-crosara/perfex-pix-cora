@@ -6,7 +6,11 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * Rotas oficiais do módulo Cora Payments (Pix & Boleto Híbrido)
  */
 
-// Webhook unificado (Pix e Boletos Cora)
+// Webhook unificado nativo (O Perfex CRM libera nativamente gateways/.* de CSRF)
+$route['gateways/cora/webhook']        = 'cora_payments/cora/webhook';
+$route['gateways/cora/webhook/(:any)'] = 'cora_payments/cora/webhook/$1';
+
+// Rotas diretas do módulo
 $route['cora_payments/cora/webhook'] = 'cora_payments/cora/webhook';
 $route['cora_payments/webhook']      = 'cora_payments/cora/webhook';
 

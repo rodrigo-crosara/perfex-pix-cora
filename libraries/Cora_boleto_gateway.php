@@ -28,7 +28,7 @@ class Cora_boleto_gateway extends App_gateway
         $this->ci->load->library('cora_payments/cora_api');
         $this->cora_api = $this->ci->cora_api;
 
-        $webhookUrl = site_url('cora_payments/cora/webhook');
+        $webhookUrl = site_url('gateways/cora/webhook');
 
         // Diagnóstico dos certificados
         $diag = $this->cora_api->diagnosticar_certificados('cora_boleto');
@@ -162,22 +162,28 @@ class Cora_boleto_gateway extends App_gateway
         }
 
         try {
-            // 1. Reutilização de Boletos Ativos (Anti-Duplicação no DDA)
+            // 1. Reutilização de Boletos Ativos (Anti-Duplicação no DDA com salvaguarda de vencimento)
             $existente = $this->ci->db->where('invoice_id', $invoice->id)
                 ->where('type', 'BOLETO')
                 ->where('status', 'PENDING')
                 ->get(db_prefix() . 'cora_transactions')
                 ->row();
 
-            // Se já existe e a URL do PDF está salva, reaproveita sem emitir outro
+            // Se já existe e a URL do PDF está salva, valida se o vencimento original ainda é válido
             if ($existente && !empty($existente->pdf_url)) {
-                $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
-                if ($redirectMode === 'pdf') {
-                    redirect($existente->pdf_url);
-                } else {
-                    redirect(site_url('cora_payments/cora/boleto_view/' . $invoice->id . '/' . $existente->txid));
+                $hoje = date('Y-m-d');
+                $vencimento = !empty($invoice->duedate) ? $invoice->duedate : $hoje;
+
+                // Se a fatura venceu após a emissão do boleto anterior, emite um novo atualizado
+                if (strtotime($vencimento) >= strtotime($hoje)) {
+                    $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
+                    if ($redirectMode === 'pdf') {
+                        redirect($existente->pdf_url);
+                    } else {
+                        redirect(site_url('cora_payments/cora/boleto_view/' . $invoice->id . '/' . $existente->txid));
+                    }
+                    return;
                 }
-                return;
             }
 
             // Emite novo boleto híbrido na Cora
@@ -189,12 +195,16 @@ class Cora_boleto_gateway extends App_gateway
 
             $boleto = $this->cora_api->criar_boleto($invoice, $amount, $customOptions);
 
+            // 1. Garante txid único baseado no ID da Cora para evitar Duplicate entry '' for key 'txid'
+            $coraInvoiceId = $boleto['cora_invoice_id'];
+            $txid          = !empty($boleto['txid']) ? $boleto['txid'] : ('BOL_' . $coraInvoiceId);
+
             // Persiste na tabela unificada cora_transactions
             $this->ci->db->insert(db_prefix() . 'cora_transactions', [
                 'invoice_id'      => (int)$invoice->id,
                 'type'            => 'BOLETO',
-                'txid'            => $boleto['txid'],
-                'cora_invoice_id' => $boleto['cora_invoice_id'],
+                'txid'            => $txid,
+                'cora_invoice_id' => $coraInvoiceId,
                 'amount'          => (float)$amount,
                 'barcode'         => $boleto['barcode'],
                 'pdf_url'         => $boleto['pdf_url'],

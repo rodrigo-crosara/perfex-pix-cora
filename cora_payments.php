@@ -48,6 +48,10 @@ hooks()->add_action('pre_system', function () {
         if (!is_array($whitelist)) {
             $whitelist = [];
         }
+        $whitelist[] = 'gateways/cora/webhook';
+        $whitelist[] = 'gateways/cora/webhook/';
+        $whitelist[] = 'gateways/cora/webhook/.*';
+        $whitelist[] = 'gateways/cora/webhook/*';
         $whitelist[] = 'cora_payments/cora/webhook';
         $whitelist[] = 'cora_payments/cora/webhook/';
         $whitelist[] = 'cora_payments/cora/webhook/.*';
@@ -74,6 +78,10 @@ function cora_payments_csrf_exclude($uris)
     if (!is_array($uris)) {
         $uris = [];
     }
+    $uris[] = 'gateways/cora/webhook';
+    $uris[] = 'gateways/cora/webhook/';
+    $uris[] = 'gateways/cora/webhook/.*';
+    $uris[] = 'gateways/cora/webhook/*';
     $uris[] = 'cora_payments/cora/webhook';
     $uris[] = 'cora_payments/cora/webhook/';
     $uris[] = 'cora_payments/cora/webhook/.*';
@@ -126,6 +134,7 @@ function cora_payments_render_admin_ui()
 {
     $testUrlAdmin = admin_url('cora_payments/cora/test_connection');
     $testUrlSite  = site_url('cora_payments/cora/test_connection');
+    $webhookUrl   = site_url('gateways/cora/webhook');
     ?>
     <script>
     document.addEventListener("DOMContentLoaded", function() {
@@ -147,8 +156,9 @@ function cora_payments_render_admin_ui()
                         <li><strong>Certificados mTLS:</strong> Baixe o certificado público (<code>.pem</code> ou <code>.crt</code>) e a chave privada (<code>.key</code>). <em>Atenção: Salve o arquivo .key de imediato, pois a Cora o exibe apenas uma vez.</em></li>
                         <li><strong>Compartilhamento Automático:</strong> Os certificados e o Client ID configurados na aba <strong>Pix Banco Cora</strong> são compartilhados automaticamente com a aba <strong>Boleto Bancário Cora</strong>! Você não precisa preencher duas vezes.</li>
                         <li><strong>Cadastro dos Dois Webhooks na Cora:</strong><br>
+                            &bull; <strong>URL Oficial do Webhook:</strong> <code style="user-select: all; font-weight: bold; background: #eef2f5; padding: 2px 6px; border-radius: 4px;"><?= $webhookUrl; ?></code><br>
                             &bull; <em>Webhook Pix:</em> Vinculado à Chave Pix para conciliação das transferências instantâneas.<br>
-                            &bull; <em>Webhook Boletos (v2):</em> No portal <a href="https://app.cora.com.br" target="_blank">app.cora.com.br</a> em <em>Integrações &gt; Webhooks</em>, cadastre a URL oficial com os eventos <strong>invoice.paid</strong> e <strong>invoice.cancelled</strong>.
+                            &bull; <em>Webhook Boletos (v2):</em> No portal <a href="https://app.cora.com.br" target="_blank">app.cora.com.br</a> em <em>Integrações &gt; Webhooks</em>, cadastre a URL oficial acima com os eventos <strong>invoice.paid</strong> e <strong>invoice.cancelled</strong>.
                         </li>
                     </ol>
                 </div>

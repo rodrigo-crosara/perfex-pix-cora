@@ -205,27 +205,35 @@ class Cora extends App_Controller
      */
     public function check_status($invoice_id = null, $txid = null)
     {
-        if (empty($invoice_id) || empty($txid)) {
+        if (empty($invoice_id)) {
             header('Content-Type: application/json');
             echo json_encode(['paid' => false, 'error' => 'Parâmetros ausentes']);
             exit;
         }
 
-        $transacao = $this->db->where('txid', $txid)
-                              ->where('invoice_id', (int)$invoice_id)
-                              ->get(db_prefix() . 'cora_transactions')->row();
-
+        $this->load->model('invoices_model');
         $invoice = $this->invoices_model->get((int)$invoice_id);
 
-        $isPaid = false;
-        if (($transacao && $transacao->status === 'CONCLUIDA') || ($invoice && (int)$invoice->status === 2)) {
-            $isPaid = true;
+        // 2. Consulta o status real da fatura no core do Perfex CRM (STATUS_PAID = 2)
+        $statusPaid = defined('Invoices_model::STATUS_PAID') ? Invoices_model::STATUS_PAID : 2;
+        $isPaid     = ($invoice && (int)$invoice->status === (int)$statusPaid);
+
+        // Suporte a detecção de liquidação em ambos os padrões (Pix: CONCLUIDA | Boleto: PAID)
+        $transacao = null;
+        if (!empty($txid)) {
+            $transacao = $this->db->where('txid', $txid)
+                                  ->where('invoice_id', (int)$invoice_id)
+                                  ->get(db_prefix() . 'cora_transactions')->row();
+
+            if (!$isPaid && $transacao && in_array(strtoupper($transacao->status), ['CONCLUIDA', 'PAID'])) {
+                $isPaid = true;
+            }
         }
 
         header('Content-Type: application/json');
         echo json_encode([
             'paid'         => $isPaid,
-            'status'       => $transacao ? $transacao->status : 'INEXISTENTE',
+            'status'       => $transacao ? $transacao->status : ($isPaid ? 'PAID' : 'PENDING'),
             'type'         => $transacao ? $transacao->type : '',
             'redirect_url' => $invoice ? site_url('invoice/' . $invoice->id . '/' . $invoice->hash) : site_url(),
         ]);

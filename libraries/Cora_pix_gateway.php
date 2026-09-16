@@ -27,8 +27,8 @@ class Cora_pix_gateway extends App_gateway
         $this->ci->load->library('cora_payments/cora_api');
         $this->cora_api = $this->ci->cora_api;
 
-        // URL do Webhook oficial
-        $webhookUrl = site_url('cora_payments/cora/webhook');
+        // URL do Webhook oficial (Liberado nativamente de CSRF pelo Perfex)
+        $webhookUrl = site_url('gateways/cora/webhook');
 
         // Diagnóstico dos certificados
         $diag = $this->cora_api->diagnosticar_certificados('cora_pix');
