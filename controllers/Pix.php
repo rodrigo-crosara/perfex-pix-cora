@@ -8,7 +8,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * Responsável por:
  * 1. Exibir a tela de pagamento com QR Code dinâmico e código Copia e Cola.
  * 2. Fornecer endpoint JSON para polling de status pelo cliente.
- * 3. Processar webhooks de conciliação automática enviados pelo Banco Cora.
+ * 3. Processar webhooks com dupla checagem anti-fraude via mTLS na API Cora.
  */
 class Pix extends App_Controller
 {
@@ -16,7 +16,7 @@ class Pix extends App_Controller
     {
         parent::__construct();
 
-        // Carrega models essenciais do Perfex CRM
+        // Carrega models e biblioteca do gateway
         $this->load->model('invoices_model');
         $this->load->library('pix_cora/pix_cora_gateway');
     }
@@ -44,7 +44,7 @@ class Pix extends App_Controller
 
         // Se a fatura já estiver paga (Status 2 = STATUS_PAID no Perfex CRM)
         if ((int)$invoice->status === 2) {
-            set_alert('info', 'Esta fatura já foi paga e baixada no sistema.');
+            set_alert('info', 'Esta fatura já se encontra liquidada.');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;
         }
@@ -66,12 +66,17 @@ class Pix extends App_Controller
             return;
         }
 
+        // Determina o valor exato a ser pago (suporte a pagamento parcial)
+        $amountToPay = !empty($transaction->amount) && (float)$transaction->amount > 0 
+            ? (float)$transaction->amount 
+            : (float)($invoice->total_left_to_pay ?? $invoice->total);
+
         $data = [
             'title'            => 'Pagamento Pix - Fatura #' . format_invoice_number($invoice->id),
             'invoice'          => $invoice,
             'transaction'      => $transaction,
             'pix_copia_cola'   => $transaction->pix_copia_cola,
-            'amount'           => $invoice->total_left_to_pay ?? $invoice->total,
+            'amount'           => $amountToPay,
             'check_status_url' => site_url('pix_cora/pix/check_status/' . $invoice->id . '/' . $txid),
             'invoice_url'      => site_url('invoice/' . $invoice->id . '/' . $invoice->hash),
         ];
@@ -80,8 +85,10 @@ class Pix extends App_Controller
     }
 
     /**
-     * Endpoint AJAX para polling do frontend
-     * Verifica se o pagamento já foi recebido e liquidado pelo Webhook
+     * 4. Endpoint de Polling para a Tela de Pagamento
+     * Rota: GET pix_cora/pix/check_status/{invoice_id}/{txid}
+     * O JavaScript da view consulta essa rota a cada 3 a 5 segundos.
+     * Assim que o status for CONCLUIDA ou a fatura estiver paga, retorna paid: true
      * 
      * @param int $invoice_id
      * @param string $txid
@@ -91,7 +98,10 @@ class Pix extends App_Controller
         $this->output->set_content_type('application/json', 'utf-8');
 
         if (empty($invoice_id) || empty($txid)) {
-            $this->output->set_output(json_encode(['paid' => false, 'error' => 'Parâmetros inválidos']));
+            $this->output->set_output(json_encode([
+                'paid'  => false,
+                'error' => 'Parâmetros ausentes'
+            ]));
             return;
         }
 
@@ -117,12 +127,13 @@ class Pix extends App_Controller
     }
 
     /**
-     * Endpoint receptor do Webhook do Banco Cora
-     * Processa notificações em lote ou individuais enviadas pela Cora/Bacen
+     * 2. Webhook com Anti-Fraude (Dupla Checagem)
+     * Não confia cegamente no POST recebido. Consulta a API da Cora via mTLS (GET /v1/cob/{txid})
+     * para confirmar que a cobrança consta como CONCLUIDA diretamente nos servidores do banco.
      */
     public function webhook()
     {
-        // Desativa checagem de CSRF para o payload recebido do webhook
+        // Garante que o CSRF não interfira na requisição externa
         if (isset($this->security)) {
             $this->security->csrf_verify = false;
         }
@@ -148,26 +159,22 @@ class Pix extends App_Controller
             return;
         }
 
-        // Identifica e normaliza a lista de pagamentos Pix recebidos
+        // Identifica os itens de Pix notificados
         $pixItems = [];
 
         if (isset($data['pix']) && is_array($data['pix'])) {
-            // Padrão Bacen (array de pix recebidos)
             $pixItems = $data['pix'];
         } elseif (isset($data['txid'])) {
-            // Payload simples/unitário com dados diretos
             $pixItems[] = $data;
         } elseif (isset($data['data']['txid'])) {
-            // Envelope de evento da Cora
             $pixItems[] = $data['data'];
         }
 
         if (empty($pixItems)) {
-            // Notificação de handshake ou evento sem pagamentos
             $this->output
                 ->set_status_header(200)
                 ->set_content_type('application/json', 'utf-8')
-                ->set_output(json_encode(['status' => 'ignored', 'message' => 'No pix items found']));
+                ->set_output(json_encode(['status' => 'ignored', 'message' => 'No pix items']));
             return;
         }
 
@@ -175,61 +182,85 @@ class Pix extends App_Controller
 
         foreach ($pixItems as $item) {
             $txid = $item['txid'] ?? null;
-            $valor = $item['valor'] ?? ($item['value'] ?? null);
             $endToEndId = $item['endToEndId'] ?? ($item['end_to_end_id'] ?? null);
 
             if (empty($txid)) {
                 continue;
             }
 
-            // Localiza a transação local pelo txid
+            // Localiza a transação local
             $this->db->where('txid', $txid);
             $transaction = $this->db->get(db_prefix() . 'pix_cora_transactions')->row();
 
             if (!$transaction) {
-                log_activity('Webhook Pix Cora: Transação não localizada para txid: ' . $txid);
+                log_activity('Webhook Pix Cora: Transação não localizada no banco local para txid: ' . $txid);
                 continue;
             }
 
-            // Verifica idempotência: se já foi concluída, não faz baixa duplicada
+            // Idempotência: se já foi concluída, não executa baixa duplicada
             if ($transaction->status === 'CONCLUIDA') {
                 $processedCount++;
                 continue;
             }
 
-            $invoice = $this->invoices_model->get($transaction->invoice_id);
-            if (!$invoice) {
-                log_activity('Webhook Pix Cora: Fatura #' . $transaction->invoice_id . ' não encontrada.');
+            // =========================================================================
+            // ANTI-FRAUDE: DUPLA CHECAGEM OBRIGATÓRIA NA API CORA VIA mTLS
+            // =========================================================================
+            $chargeData = $this->pix_cora_gateway->get_charge($txid);
+
+            if (!$chargeData || !isset($chargeData['status'])) {
+                log_activity('Alerta Anti-Fraude Pix Cora: Consulta mTLS falhou ao verificar txid ' . $txid . '. Notificação descartada.');
                 continue;
             }
 
-            $paymentAmount = !empty($valor) ? (float)$valor : (float)$invoice->total;
+            $coraStatus = strtoupper(trim($chargeData['status']));
+            if ($coraStatus !== 'CONCLUIDA') {
+                log_activity('Alerta Anti-Fraude Pix Cora: Status da cobrança na API Cora é "' . $coraStatus . '" (não CONCLUIDA). Baixa cancelada para txid: ' . $txid);
+                continue;
+            }
 
-            // Efetua a baixa oficial da fatura no Perfex CRM via addPayment do gateway
+            // Validação de fatura
+            $invoice = $this->invoices_model->get($transaction->invoice_id);
+            if (!$invoice) {
+                log_activity('Webhook Pix Cora: Fatura #' . $transaction->invoice_id . ' inexistente.');
+                continue;
+            }
+
+            // Valor autenticado pela API Cora ou registrado na transação
+            $officialAmount = 0.0;
+            if (isset($chargeData['valor']['original'])) {
+                $officialAmount = (float)$chargeData['valor']['original'];
+            } elseif (!empty($transaction->amount) && (float)$transaction->amount > 0) {
+                $officialAmount = (float)$transaction->amount;
+            } else {
+                $officialAmount = (float)$invoice->total;
+            }
+
+            // Baixa contábil no Perfex CRM
             $paymentData = [
-                'amount'        => $paymentAmount,
+                'amount'        => $officialAmount,
                 'invoiceid'     => (int)$transaction->invoice_id,
                 'paymentmode'   => 'pix_cora',
                 'paymentmethod' => 'Pix Banco Cora',
                 'transactionid' => !empty($endToEndId) ? $endToEndId : $txid,
-                'note'          => 'Pagamento Pix recebido via Webhook Cora. EndToEndId: ' . ($endToEndId ?: 'N/A') . ' | TxID: ' . $txid,
+                'note'          => 'Pagamento Pix Banco Cora confirmado via mTLS Anti-Fraude. EndToEndId: ' . ($endToEndId ?: 'N/A') . ' | TxID: ' . $txid,
                 'date'          => date('Y-m-d H:i:s'),
             ];
 
             $paymentId = $this->pix_cora_gateway->addPayment($paymentData);
 
             if ($paymentId) {
-                // Atualiza a tabela de transações do módulo para status CONCLUIDA
+                // Atualiza status da transação local
                 $this->db->where('id', $transaction->id);
                 $this->db->update(db_prefix() . 'pix_cora_transactions', [
                     'status'  => 'CONCLUIDA',
                     'paid_at' => date('Y-m-d H:i:s'),
                 ]);
 
-                log_activity('Pagamento Pix Banco Cora liquidado com sucesso para Fatura #' . $transaction->invoice_id . ' (TxID: ' . $txid . ')');
+                log_activity('Pagamento Pix Cora liquidado e verificado com sucesso para Fatura #' . $transaction->invoice_id . ' (TxID: ' . $txid . ')');
                 $processedCount++;
             } else {
-                log_activity('Falha ao registrar pagamento no Perfex CRM para Fatura #' . $transaction->invoice_id . ' (TxID: ' . $txid . ')');
+                log_activity('Falha ao registrar pagamento via addPayment para Fatura #' . $transaction->invoice_id);
             }
         }
 
