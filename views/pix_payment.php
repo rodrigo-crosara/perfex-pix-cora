@@ -198,7 +198,7 @@
 <div class="pix-container">
     <div class="pix-card">
         <div class="pix-header">
-            <h2><i class="fab fa-pix text-primary"></i> Pagamento via Pix Direto</h2>
+            <h2><i class="fab fa-pix text-primary"></i> Pagamento via Pix Banco Cora</h2>
             <p>Fatura #<?= html_escape(format_invoice_number($invoice->id)); ?> &bull; <?= html_escape(get_option('companyname')); ?></p>
         </div>
 
@@ -236,12 +236,12 @@
 
             <!-- Instruções -->
             <div class="instruction-steps">
-                <h4><i class="fas fa-info-circle text-info"></i> Como pagar pelo seu aplicativo:</h4>
+                <h4><i class="fas fa-info-circle text-info"></i> Como pagar pelo aplicativo do seu banco:</h4>
                 <ol>
-                    <li>Abra o aplicativo do seu banco ou carteira digital favorita.</li>
-                    <li>Acesse a área <strong>Pix</strong> e escolha <strong>Pagar com QR Code</strong> ou <strong>Pix Copia e Cola</strong>.</li>
-                    <li>Escaneie a imagem acima ou cole o código copiado.</li>
-                    <li>Confira o valor e confirme a transferência. A confirmação é instantânea!</li>
+                    <li>Abra o aplicativo do seu banco de preferência.</li>
+                    <li>Selecione a opção <strong>Pix</strong> e clique em <strong>Pagar com QR Code</strong> ou <strong>Pix Copia e Cola</strong>.</li>
+                    <li>Escaneie a imagem do QR Code ou cole o código copiado.</li>
+                    <li>Confira o valor e os dados e confirme. A baixa nesta tela ocorrerá em instantes!</li>
                 </ol>
             </div>
         </div>
@@ -297,7 +297,6 @@
             copyInput.select();
             copyInput.setSelectionRange(0, 99999);
 
-            var copied = false;
             if (navigator.clipboard && window.isSecureContext) {
                 navigator.clipboard.writeText(pixPayload).then(function() {
                     applyCopiedState();
@@ -328,7 +327,7 @@
             }
         });
 
-        // 3. Polling em segundo plano para detecção imediata do Webhook
+        // 3. Polling em segundo plano para detecção em tempo real do Webhook
         var pollingInterval = setInterval(function() {
             fetch(checkStatusUrl, {
                 method: 'GET',
@@ -352,7 +351,7 @@
                 }
             })
             .catch(function(error) {
-                // Silencia erros transitórios de rede no polling
+                // Silencia erros temporários de rede
             });
         }, 4000);
     });

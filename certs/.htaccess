@@ -1,3 +1,4 @@
+# Bloqueio estrito de acesso HTTP/HTTPS para Apache e LiteSpeed
 <IfModule authz_core_module>
     Require all denied
 </IfModule>

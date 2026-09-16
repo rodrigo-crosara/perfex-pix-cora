@@ -1,0 +1,836 @@
+<?php
+
+defined('BASEPATH') or exit('No direct script access allowed');
+
+/**
+ * Cora_api
+ * 
+ * Biblioteca central e unificada de comunicação mTLS e API REST com o Banco Cora.
+ * Utilizada simultaneamente pelos gateways Cora Pix e Cora Boleto Híbrido no Perfex CRM.
+ * 
+ * Funcionalidades:
+ * - Gerenciamento e sincronização atômica de certificados mTLS com verificação MD5.
+ * - Suporte automático a Sandbox (stage.cora.com.br) e Produção (api.cora.com.br).
+ * - Autenticação OAuth2 Client Credentials com cache de token.
+ * - Emissão de Pix Imediato Bacen (PUT /v1/cob/{txid}).
+ * - Emissão de Boleto Bancário Híbrido com Pix (POST /v2/invoices) e régua de cobrança/WhatsApp.
+ * - Consulta ativa anti-fraude para Pix e Boletos (dupla checagem mTLS).
+ * - Diagnóstico em tempo real de certificados OpenSSL (validade, emissor e integridade de chave).
+ */
+class Cora_api
+{
+    const PROD_BASE_URL  = 'https://matls-clients.api.cora.com.br';
+    const STAGE_BASE_URL = 'https://matls-clients.stage.cora.com.br';
+
+    /**
+     * Instância do CodeIgniter
+     * @var object
+     */
+    protected $ci;
+
+    /**
+     * Token de acesso em cache de memória para o ciclo atual
+     * @var string|null
+     */
+    private static $memory_token = null;
+
+    /**
+     * Timestamp de expiração do token em memória
+     * @var int|null
+     */
+    private static $memory_token_expires = null;
+
+    public function __construct()
+    {
+        $this->ci = &get_instance();
+    }
+
+    /**
+     * Recupera uma configuração buscando prioritariamente no gateway específico,
+     * fazendo fallback para o outro gateway ou para as opções globais do módulo.
+     *
+     * @param string $key Chave da configuração (ex: 'client_id', 'sandbox', 'cert_content')
+     * @param string $preferredGateway 'cora_pix' ou 'cora_boleto'
+     * @return mixed
+     */
+    public function get_setting($key, $preferredGateway = 'cora_pix')
+    {
+        $altGateway = ($preferredGateway === 'cora_pix') ? 'cora_boleto' : 'cora_pix';
+
+        // 1. Tenta gateway preferencial
+        $val = get_option('paymentmethod_' . $preferredGateway . '_' . $key);
+        if ($val !== '' && $val !== false && $val !== null) {
+            return $val;
+        }
+
+        // 2. Tenta gateway alternativo (compartilhamento de credenciais)
+        $valAlt = get_option('paymentmethod_' . $altGateway . '_' . $key);
+        if ($valAlt !== '' && $valAlt !== false && $valAlt !== null) {
+            return $valAlt;
+        }
+
+        // 3. Tenta opção global do módulo
+        $valGlobal = get_option('cora_payments_' . $key);
+        if ($valGlobal !== '' && $valGlobal !== false && $valGlobal !== null) {
+            return $valGlobal;
+        }
+
+        return null;
+    }
+
+    /**
+     * Retorna a URL base de acordo com o ambiente configurado (Sandbox vs Produção)
+     *
+     * @param string $gateway
+     * @return string
+     */
+    public function get_base_url($gateway = 'cora_pix')
+    {
+        $is_sandbox = (bool)$this->get_setting('sandbox', $gateway);
+        return $is_sandbox ? self::STAGE_BASE_URL : self::PROD_BASE_URL;
+    }
+
+    /**
+     * Retorna o diretório seguro de certificados mTLS do módulo
+     *
+     * @return string
+     */
+    public function get_certs_dir()
+    {
+        $certsDir = module_dir_path('cora_payments', 'certs');
+        if (!is_dir($certsDir)) {
+            @mkdir($certsDir, 0700, true);
+            @file_put_contents($certsDir . DIRECTORY_SEPARATOR . '.htaccess', "<IfModule authz_core_module>\n    Require all denied\n</IfModule>\n<IfModule !authz_core_module>\n    Deny from all\n</IfModule>\n");
+            @file_put_contents($certsDir . DIRECTORY_SEPARATOR . 'index.html', '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body><p>Directory access is forbidden.</p></body></html>');
+            @file_put_contents($certsDir . DIRECTORY_SEPARATOR . 'index.php', "<?php\ndefined('BASEPATH') or exit('No direct script access allowed');\nheader('HTTP/1.1 403 Forbidden');\nexit('Access denied.');\n");
+        }
+        return rtrim($certsDir, '/\\');
+    }
+
+    /**
+     * Leitura e sincronização inteligente dos certificados mTLS (.pem e .key).
+     * Utiliza verificação de hash MD5 para evitar I/O desnecessário no disco.
+     *
+     * @param string $gateway
+     * @return array ['cert' => caminho_cert, 'key' => caminho_key]
+     * @throws Exception
+     */
+    public function get_cert_paths($gateway = 'cora_pix')
+    {
+        $certsDir = $this->get_certs_dir();
+        $certFile = $certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem';
+        $keyFile  = $certsDir . DIRECTORY_SEPARATOR . 'cora_key.key';
+
+        $certContent = trim($this->get_setting('cert_content', $gateway) ?? '');
+        $keyContent  = trim($this->get_setting('key_content', $gateway) ?? '');
+
+        // Suporte à descriptografia caso Perfex tenha armazenado encriptado
+        if (isset($this->ci->encryption)) {
+            if (!empty($certContent) && strpos($certContent, '-----BEGIN') === false) {
+                $decrypted = $this->ci->encryption->decrypt($certContent);
+                if ($decrypted !== false && strpos($decrypted, '-----BEGIN') !== false) {
+                    $certContent = $decrypted;
+                }
+            }
+            if (!empty($keyContent) && strpos($keyContent, '-----BEGIN') === false) {
+                $decryptedKey = $this->ci->encryption->decrypt($keyContent);
+                if ($decryptedKey !== false && strpos($decryptedKey, '-----BEGIN') !== false) {
+                    $keyContent = $decryptedKey;
+                }
+            }
+        }
+
+        // Se ambos os conteúdos de banco estiverem vazios, verifica se existem arquivos físicos
+        if (empty($certContent) || empty($keyContent)) {
+            if (file_exists($certFile) && file_exists($keyFile)) {
+                return ['cert' => $certFile, 'key' => $keyFile];
+            }
+            throw new Exception('Certificado mTLS (.pem) ou Chave Privada (.key) não configurados nas opções do gateway Cora Payments.');
+        }
+
+        // Sincronização inteligente com verificação de hash MD5 (evita gravação em disco se idêntico)
+        if (!file_exists($certFile) || md5_file($certFile) !== md5($certContent)) {
+            @file_put_contents($certFile, $certContent);
+            @chmod($certFile, 0600);
+        }
+
+        if (!file_exists($keyFile) || md5_file($keyFile) !== md5($keyContent)) {
+            @file_put_contents($keyFile, $keyContent);
+            @chmod($keyFile, 0600);
+        }
+
+        return ['cert' => $certFile, 'key' => $keyFile];
+    }
+
+    /**
+     * Diagnóstico Automático do Certificado e Chave Privada
+     * Analisa validade, emissor e formato da chave OpenSSL.
+     *
+     * @param string $gateway
+     * @return array
+     */
+    public function diagnosticar_certificados($gateway = 'cora_pix')
+    {
+        $certRaw = trim($this->get_setting('cert_content', $gateway) ?? '');
+        $keyRaw  = trim($this->get_setting('key_content', $gateway) ?? '');
+
+        $result = [
+            'cert_valido'   => false,
+            'cert_mensagem' => 'Certificado não configurado.',
+            'key_valida'    => false,
+            'key_mensagem'  => 'Chave privada não configurada.',
+            'expira_em'     => null,
+        ];
+
+        // Análise do Certificado Público
+        if (!empty($certRaw)) {
+            $certContent = $certRaw;
+            if (isset($this->ci->encryption) && strpos($certRaw, '-----BEGIN') === false) {
+                $dec = $this->ci->encryption->decrypt($certRaw);
+                if ($dec !== false && strpos($dec, '-----BEGIN') !== false) {
+                    $certContent = $dec;
+                }
+            }
+
+            $parsed = @openssl_x509_parse($certContent);
+            if ($parsed && isset($parsed['validTo_time_t'])) {
+                $validTo = date('d/m/Y H:i:s', $parsed['validTo_time_t']);
+                $result['expira_em'] = $validTo;
+
+                if (time() > $parsed['validTo_time_t']) {
+                    $result['cert_valido']   = false;
+                    $result['cert_mensagem'] = 'Certificado EXPIRADO em ' . $validTo . '! Gere um novo certificado no portal Cora.';
+                } else {
+                    $result['cert_valido']   = true;
+                    $issuer = $parsed['issuer']['CN'] ?? ($parsed['issuer']['O'] ?? 'Banco Cora');
+                    $result['cert_mensagem'] = 'Certificado válido até: ' . $validTo . ' (Emissor: ' . $issuer . ')';
+                }
+            } else {
+                $result['cert_valido']   = false;
+                $result['cert_mensagem'] = 'Formato de certificado inválido. Certifique-se de incluir as tags -----BEGIN CERTIFICATE----- e -----END CERTIFICATE-----.';
+            }
+        }
+
+        // Análise da Chave Privada
+        if (!empty($keyRaw)) {
+            $keyContent = $keyRaw;
+            if (isset($this->ci->encryption) && strpos($keyRaw, '-----BEGIN') === false) {
+                $decKey = $this->ci->encryption->decrypt($keyRaw);
+                if ($decKey !== false && strpos($decKey, '-----BEGIN') !== false) {
+                    $keyContent = $decKey;
+                }
+            }
+
+            $hasHeader = (strpos($keyContent, 'BEGIN RSA PRIVATE KEY') !== false || strpos($keyContent, 'BEGIN PRIVATE KEY') !== false);
+            $pkey = @openssl_pkey_get_private($keyContent);
+
+            if ($hasHeader && $pkey !== false) {
+                $result['key_valida']   = true;
+                $result['key_mensagem'] = 'Chave Privada RSA válida e compatível com OpenSSL.';
+            } else {
+                $result['key_valida']   = false;
+                $result['key_mensagem'] = 'Formato de chave incorreto. Certifique-se de incluir as tags -----BEGIN RSA PRIVATE KEY----- ou -----BEGIN PRIVATE KEY-----.';
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Autenticação OAuth2 Client Credentials com cache de token
+     *
+     * @param string $gateway
+     * @param bool $forceRefresh
+     * @return string Bearer Token
+     * @throws Exception
+     */
+    public function get_token($gateway = 'cora_pix', $forceRefresh = false)
+    {
+        $now = time();
+
+        // 1. Verifica cache em memória
+        if (!$forceRefresh && !empty(self::$memory_token) && self::$memory_token_expires > ($now + 60)) {
+            return self::$memory_token;
+        }
+
+        // 2. Verifica cache em banco de dados
+        $cacheKey = 'cora_oauth_token_' . md5($this->get_base_url($gateway) . $this->get_setting('client_id', $gateway));
+        if (!$forceRefresh) {
+            $cached = get_option($cacheKey);
+            if (!empty($cached)) {
+                $tokenData = json_decode($cached, true);
+                if (is_array($tokenData) && isset($tokenData['token']) && isset($tokenData['expires_at']) && $tokenData['expires_at'] > ($now + 60)) {
+                    self::$memory_token = $tokenData['token'];
+                    self::$memory_token_expires = $tokenData['expires_at'];
+                    return self::$memory_token;
+                }
+            }
+        }
+
+        // 3. Solicita novo token via mTLS
+        $clientId = trim($this->get_setting('client_id', $gateway) ?? '');
+        if (empty($clientId)) {
+            throw new Exception('Client ID da Cora não configurado. Acesse as configurações do módulo para informar.');
+        }
+
+        $certs = $this->get_cert_paths($gateway);
+        $tokenUrl = $this->get_base_url($gateway) . '/token';
+
+        $postFields = http_build_query([
+            'grant_type' => 'client_credentials',
+            'client_id'  => $clientId,
+        ]);
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $tokenUrl,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $postFields,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSLCERT        => $certs['cert'],
+            CURLOPT_SSLKEY         => $certs['key'],
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_HTTPHEADER     => [
+                'Content-Type: application/x-www-form-urlencoded',
+                'Accept: application/json',
+            ],
+            CURLOPT_TIMEOUT        => 30,
+        ]);
+
+        $response  = curl_exec($ch);
+        $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+        curl_close($ch);
+
+        if ($curlError) {
+            log_activity('Erro cURL mTLS Cora Auth: ' . $curlError);
+            throw new Exception('Erro de conexão mTLS com Banco Cora: ' . $curlError);
+        }
+
+        $json = json_decode($response, true);
+
+        if ($httpCode !== 200 || !isset($json['access_token'])) {
+            $msg = $json['message'] ?? ($json['error_description'] ?? 'Falha na resposta do servidor de autenticação Cora');
+            log_activity('Falha no token mTLS Cora (HTTP ' . $httpCode . '): ' . $response);
+            throw new Exception('Erro de autenticação mTLS no Banco Cora: ' . $msg);
+        }
+
+        $accessToken = $json['access_token'];
+        $expiresIn   = isset($json['expires_in']) ? (int)$json['expires_in'] : 3600;
+        $expiresAt   = $now + $expiresIn;
+
+        self::$memory_token         = $accessToken;
+        self::$memory_token_expires = $expiresAt;
+
+        // Salva em cache no banco
+        update_option($cacheKey, json_encode([
+            'token'      => $accessToken,
+            'expires_at' => $expiresAt,
+        ]));
+
+        return $accessToken;
+    }
+
+    /**
+     * Emissão de Pix Imediato (PUT /v1/cob/{txid})
+     *
+     * @param object $invoice Objeto fatura Perfex
+     * @param float $amount Valor da transação
+     * @param string|null $txid TxID opcional (se nulo, gerado automaticamente)
+     * @return array ['txid' => ..., 'pix_copia_cola' => ...]
+     * @throws Exception
+     */
+    public function criar_pix($invoice, $amount, $txid = null)
+    {
+        $chavePix = trim($this->get_setting('chave_pix', 'cora_pix') ?? '');
+        if (empty($chavePix)) {
+            throw new Exception('Chave Pix não configurada nas configurações do gateway.');
+        }
+
+        // Validação Fiscal: Documento (CPF 11 ou CNPJ 14)
+        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
+            throw new Exception('O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Pix.');
+        }
+
+        $token = $this->get_token('cora_pix');
+        $certs = $this->get_cert_paths('cora_pix');
+
+        if (empty($txid)) {
+            // TxID alfanumérico único entre 26 e 35 caracteres conforme padrão Bacen
+            $txid = 'CORA' . date('YmdHis') . strtoupper(substr(bin2hex(random_bytes(6)), 0, 12));
+        }
+
+        $clientName = '';
+        if (isset($invoice->client->company) && !empty($invoice->client->company)) {
+            $clientName = trim($invoice->client->company);
+        } elseif (isset($invoice->clientid)) {
+            $clientName = get_company_name($invoice->clientid);
+        }
+        if (empty($clientName)) {
+            $clientName = 'Cliente Fatura #' . $invoice->id;
+        }
+
+        $expMinutes = (int)($this->get_setting('expiration_minutes', 'cora_pix') ?: 1440);
+        $expSeconds = $expMinutes * 60;
+
+        $payload = [
+            'calendario' => [
+                'expiracao' => $expSeconds,
+            ],
+            'devedor' => [
+                'nome' => mb_substr($clientName, 0, 200, 'UTF-8'),
+            ],
+            'valor' => [
+                'original' => number_format((float)$amount, 2, '.', ''),
+            ],
+            'chave' => $chavePix,
+            'solicitacaoPagador' => 'Fatura #' . format_invoice_number($invoice->id),
+        ];
+
+        if (strlen($doc) === 14) {
+            $payload['devedor']['cnpj'] = $doc;
+        } else {
+            $payload['devedor']['cpf'] = $doc;
+        }
+
+        $url = $this->get_base_url('cora_pix') . '/v1/cob/' . $txid;
+        $jsonPayload = json_encode($payload);
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $url,
+            CURLOPT_CUSTOMREQUEST  => 'PUT',
+            CURLOPT_POSTFIELDS     => $jsonPayload,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSLCERT        => $certs['cert'],
+            CURLOPT_SSLKEY         => $certs['key'],
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_HTTPHEADER     => [
+                'Authorization: Bearer ' . $token,
+                'Content-Type: application/json',
+                'Accept: application/json',
+            ],
+            CURLOPT_TIMEOUT        => 30,
+        ]);
+
+        $response  = curl_exec($ch);
+        $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+        curl_close($ch);
+
+        if ($curlError) {
+            log_activity('Erro cURL Pix Cora (txid: ' . $txid . '): ' . $curlError);
+            throw new Exception('Erro de conexão ao criar cobrança Pix na Cora: ' . $curlError);
+        }
+
+        $resJson = json_decode($response, true);
+
+        if ($httpCode !== 200 && $httpCode !== 201) {
+            $errorDetail = $resJson['mensagem'] ?? ($resJson['message'] ?? ($resJson['detail'] ?? 'Erro desconhecido retornado pela API Cora'));
+            log_activity('Erro API Cora Cobrança Pix (HTTP ' . $httpCode . '): ' . $response);
+            throw new Exception('Banco Cora rejeitou a cobrança Pix: ' . $errorDetail);
+        }
+
+        $pixCopiaECola = $resJson['pixCopiaECola'] ?? ($resJson['qrcode'] ?? ($resJson['emv'] ?? ''));
+        if (empty($pixCopiaECola) && isset($resJson['loc']['id'])) {
+            $pixCopiaECola = $resJson['textoImagemQRcode'] ?? '';
+        }
+
+        if (empty($pixCopiaECola)) {
+            throw new Exception('O Banco Cora gerou a cobrança, mas não retornou o código Pix Copia e Cola.');
+        }
+
+        return [
+            'txid'           => $txid,
+            'pix_copia_cola' => $pixCopiaECola,
+            'amount'         => (float)$amount,
+            'response'       => $resJson,
+        ];
+    }
+
+    /**
+     * Emissão de Boleto Bancário Híbrido com Pix (POST /v2/invoices)
+     * 
+     * Monta payload completo com customer, telefone com DDD para acionamento
+     * da régua de cobrança/WhatsApp da Cora, multa, juros e opções BANK_SLIP + PIX.
+     *
+     * @param object $invoice Objeto fatura Perfex
+     * @param float $amount Valor da cobrança
+     * @param array $customOptions Opções adicionais (multa, juros, dias_cancelamento)
+     * @return array
+     * @throws Exception
+     */
+    public function criar_boleto($invoice, $amount, $customOptions = [])
+    {
+        // 1. Validação Fiscal do Cliente: Documento (CPF 11 ou CNPJ 14)
+        $doc = preg_replace('/\D/', '', $invoice->client->vat ?? '');
+        if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
+            throw new Exception('O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Boleto Bancário.');
+        }
+
+        $token = $this->get_token('cora_boleto');
+        $certs = $this->get_cert_paths('cora_boleto');
+
+        // Nome do pagador
+        $clientName = '';
+        if (isset($invoice->client->company) && !empty($invoice->client->company)) {
+            $clientName = trim($invoice->client->company);
+        } elseif (isset($invoice->clientid)) {
+            $clientName = get_company_name($invoice->clientid);
+        }
+        if (empty($clientName)) {
+            $clientName = 'Cliente Fatura #' . $invoice->id;
+        }
+
+        // Email do cliente
+        $clientEmail = '';
+        if (isset($invoice->client->email) && !empty($invoice->client->email)) {
+            $clientEmail = trim($invoice->client->email);
+        } else {
+            // Tenta obter email do contato principal
+            if (isset($invoice->clientid)) {
+                $primaryContact = $this->ci->clients_model->get_contact(get_primary_contact_user_id($invoice->clientid));
+                if ($primaryContact && !empty($primaryContact->email)) {
+                    $clientEmail = trim($primaryContact->email);
+                }
+            }
+        }
+        if (empty($clientEmail)) {
+            $clientEmail = 'financeiro@' . (!empty($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'cora.com.br');
+        }
+
+        // Telefone higienizado com DDD para régua de cobrança / WhatsApp
+        $rawPhone = $invoice->client->phonenumber ?? '';
+        if (empty($rawPhone) && isset($primaryContact) && !empty($primaryContact->phonenumber)) {
+            $rawPhone = $primaryContact->phonenumber;
+        }
+        $cleanPhone = $this->sanitizar_telefone($rawPhone);
+
+        // Monta o objeto Customer
+        $customerObj = [
+            'name'     => mb_substr($clientName, 0, 150, 'UTF-8'),
+            'email'    => $clientEmail,
+            'document' => [
+                'identity' => $doc,
+                'type'     => (strlen($doc) === 14) ? 'CNPJ' : 'CPF',
+            ],
+        ];
+
+        if (!empty($cleanPhone)) {
+            $customerObj['phone_number'] = $cleanPhone;
+        }
+
+        // Endereço do cliente (se disponível)
+        $address = $this->montar_endereco_cliente($invoice);
+        if (!empty($address)) {
+            $customerObj['address'] = $address;
+        }
+
+        // Data de Vencimento
+        $dueDate = !empty($invoice->duedate) ? $invoice->duedate : date('Y-m-d', strtotime('+3 days'));
+        // Se a data de vencimento for anterior a hoje, ajusta para hoje para permitir emissão
+        if (strtotime($dueDate) < strtotime(date('Y-m-d'))) {
+            $dueDate = date('Y-m-d');
+        }
+
+        // Condições de Pagamento (Multa e Juros)
+        $paymentTerms = [
+            'due_date' => $dueDate,
+        ];
+
+        // Multa por atraso (%)
+        $multaPercent = isset($customOptions['multa']) ? (float)$customOptions['multa'] : (float)$this->get_setting('multa_percentual', 'cora_boleto');
+        if ($multaPercent > 0) {
+            $paymentTerms['fine'] = [
+                'rate' => round($multaPercent, 2),
+            ];
+        }
+
+        // Juros de mora ao mês (%)
+        $jurosPercent = isset($customOptions['juros']) ? (float)$customOptions['juros'] : (float)$this->get_setting('juros_mensal_percentual', 'cora_boleto');
+        if ($jurosPercent > 0) {
+            $paymentTerms['interest'] = [
+                'rate' => round($jurosPercent, 2),
+            ];
+        }
+
+        // TxID único para identificação interna da cobrança
+        $txid = 'BOL' . date('YmdHis') . strtoupper(substr(bin2hex(random_bytes(6)), 0, 10));
+
+        // Descrição e Valor em Centavos (Cora API v2 usa centavos)
+        $amountInCents = (int)round($amount * 100);
+        $serviceName = 'Fatura #' . format_invoice_number($invoice->id);
+
+        $payload = [
+            'code'            => $txid,
+            'customer'        => $customerObj,
+            'services'        => [
+                [
+                    'name'   => mb_substr($serviceName, 0, 100, 'UTF-8'),
+                    'amount' => $amountInCents,
+                ],
+            ],
+            'payment_terms'   => $paymentTerms,
+            'payment_options' => [
+                'BANK_SLIP',
+                'PIX',
+            ],
+        ];
+
+        $url = $this->get_base_url('cora_boleto') . '/v2/invoices';
+        $jsonPayload = json_encode($payload);
+        $idempotencyKey = $this->generate_uuid();
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $url,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $jsonPayload,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSLCERT        => $certs['cert'],
+            CURLOPT_SSLKEY         => $certs['key'],
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_HTTPHEADER     => [
+                'Authorization: Bearer ' . $token,
+                'Content-Type: application/json',
+                'Accept: application/json',
+                'Idempotency-Key: ' . $idempotencyKey,
+            ],
+            CURLOPT_TIMEOUT        => 35,
+        ]);
+
+        $response  = curl_exec($ch);
+        $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+        curl_close($ch);
+
+        if ($curlError) {
+            log_activity('Erro cURL Boleto Cora (Fatura #' . $invoice->id . '): ' . $curlError);
+            throw new Exception('Erro de conexão ao emitir boleto no Banco Cora: ' . $curlError);
+        }
+
+        $resJson = json_decode($response, true);
+
+        if ($httpCode !== 200 && $httpCode !== 201) {
+            $msg = $resJson['message'] ?? ($resJson['detail'] ?? ($resJson['errors'][0]['message'] ?? 'Erro desconhecido na emissão de boleto Cora'));
+            log_activity('Erro API Cora Boleto (HTTP ' . $httpCode . '): ' . $response);
+            throw new Exception('Banco Cora rejeitou a emissão do boleto: ' . $msg);
+        }
+
+        // Extrai dados retornados pela Cora
+        $coraInvoiceId = $resJson['id'] ?? '';
+        $barcode       = $resJson['bank_slip']['barcode'] ?? ($resJson['bank_slip']['digitable_line'] ?? '');
+        $digitable     = $resJson['bank_slip']['digitable_line'] ?? $barcode;
+        $pdfUrl        = $resJson['bank_slip']['url'] ?? '';
+
+        // Pix Copia e Cola embutido no boleto híbrido
+        $pixCopiaECola = '';
+        if (isset($resJson['payment_options']['pix']['emv'])) {
+            $pixCopiaECola = $resJson['payment_options']['pix']['emv'];
+        } elseif (isset($resJson['payment_options']['pix']['qrcode'])) {
+            $pixCopiaECola = $resJson['payment_options']['pix']['qrcode'];
+        }
+
+        if (empty($pdfUrl) && empty($barcode)) {
+            throw new Exception('O Banco Cora processou a requisição, mas não retornou os dados do boleto bancário.');
+        }
+
+        return [
+            'txid'            => $txid,
+            'cora_invoice_id' => $coraInvoiceId,
+            'barcode'         => $barcode,
+            'digitable_line'  => $digitable,
+            'pdf_url'         => $pdfUrl,
+            'pix_copia_cola'  => $pixCopiaECola,
+            'amount'          => (float)$amount,
+            'response'        => $resJson,
+        ];
+    }
+
+    /**
+     * 6. Dupla Checagem Ativa Anti-Fraude: Consulta cobrança Pix (GET /v1/cob/{txid})
+     *
+     * @param string $txid Identificador da cobrança Pix
+     * @return array|false
+     */
+    public function consultar_cobranca($txid)
+    {
+        try {
+            $token = $this->get_token('cora_pix');
+            if (!$token) {
+                return false;
+            }
+
+            $paths = $this->get_cert_paths('cora_pix');
+            $url   = $this->get_base_url('cora_pix') . '/v1/cob/' . urlencode($txid);
+
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPGET        => true,
+                CURLOPT_HTTPHEADER     => [
+                    'Authorization: Bearer ' . $token,
+                    'Accept: application/json',
+                ],
+                CURLOPT_SSLCERT        => $paths['cert'],
+                CURLOPT_SSLKEY         => $paths['key'],
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_TIMEOUT        => 20,
+            ]);
+
+            $res       = curl_exec($ch);
+            $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            if ($curlError) {
+                log_activity('Anti-Fraude Cora Pix: Falha cURL ao consultar txid ' . $txid . ': ' . $curlError);
+                return false;
+            }
+
+            return ($httpCode === 200) ? json_decode($res, true) : false;
+        } catch (Exception $e) {
+            log_activity('Anti-Fraude Cora Pix: Exceção ao consultar txid ' . $txid . ': ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Dupla Checagem Ativa Anti-Fraude: Consulta Fatura/Boleto Cora (GET /v2/invoices/{id})
+     *
+     * @param string $coraInvoiceId ID da fatura na Cora (ex: inv_...)
+     * @return array|false
+     */
+    public function consultar_fatura($coraInvoiceId)
+    {
+        try {
+            $token = $this->get_token('cora_boleto');
+            if (!$token) {
+                return false;
+            }
+
+            $paths = $this->get_cert_paths('cora_boleto');
+            $url   = $this->get_base_url('cora_boleto') . '/v2/invoices/' . urlencode($coraInvoiceId);
+
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPGET        => true,
+                CURLOPT_HTTPHEADER     => [
+                    'Authorization: Bearer ' . $token,
+                    'Accept: application/json',
+                ],
+                CURLOPT_SSLCERT        => $paths['cert'],
+                CURLOPT_SSLKEY         => $paths['key'],
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_TIMEOUT        => 20,
+            ]);
+
+            $res       = curl_exec($ch);
+            $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            if ($curlError) {
+                log_activity('Anti-Fraude Cora Boleto: Falha cURL ao consultar fatura ' . $coraInvoiceId . ': ' . $curlError);
+                return false;
+            }
+
+            return ($httpCode === 200) ? json_decode($res, true) : false;
+        } catch (Exception $e) {
+            log_activity('Anti-Fraude Cora Boleto: Exceção ao consultar fatura ' . $coraInvoiceId . ': ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Sanitiza telefone para o formato aceito pela Cora (+5511999999999 ou DDD + Número)
+     * permitindo acionamento correto de WhatsApp e régua de cobrança automática.
+     *
+     * @param string $phone
+     * @return string
+     */
+    public function sanitizar_telefone($phone)
+    {
+        $digits = preg_replace('/\D/', '', $phone);
+        if (empty($digits)) {
+            return '';
+        }
+
+        // Se já começa com DDI 55 e tem 12 ou 13 dígitos
+        if (substr($digits, 0, 2) === '55' && (strlen($digits) === 12 || strlen($digits) === 13)) {
+            return '+' . $digits;
+        }
+
+        // Se tem 10 dígitos (DDD + 8 dígitos) ou 11 dígitos (DDD + 9 dígitos)
+        if (strlen($digits) === 10 || strlen($digits) === 11) {
+            return '+55' . $digits;
+        }
+
+        return '+' . $digits;
+    }
+
+    /**
+     * Monta estrutura de endereço do cliente a partir da fatura
+     *
+     * @param object $invoice
+     * @return array|null
+     */
+    protected function montar_endereco_cliente($invoice)
+    {
+        $street   = !empty($invoice->billing_street) ? $invoice->billing_street : ($invoice->client->address ?? '');
+        $city     = !empty($invoice->billing_city) ? $invoice->billing_city : ($invoice->client->city ?? '');
+        $state    = !empty($invoice->billing_state) ? $invoice->billing_state : ($invoice->client->state ?? '');
+        $zip      = !empty($invoice->billing_zip) ? $invoice->billing_zip : ($invoice->client->zip ?? '');
+        $cleanZip = preg_replace('/\D/', '', $zip);
+
+        if (empty($street) && empty($city)) {
+            return null;
+        }
+
+        // Tenta separar número caso esteja no formato "Rua Nome, 123"
+        $number = 'S/N';
+        if (preg_match('/,\s*(\d+.*)$/', $street, $matches)) {
+            $number = trim($matches[1]);
+            $street = trim(preg_replace('/,\s*(\d+.*)$/', '', $street));
+        }
+
+        $address = [
+            'street' => mb_substr($street, 0, 100, 'UTF-8') ?: 'Não informado',
+            'number' => mb_substr($number, 0, 20, 'UTF-8'),
+        ];
+
+        if (!empty($city)) {
+            $address['city'] = mb_substr($city, 0, 60, 'UTF-8');
+        }
+
+        if (!empty($state)) {
+            $address['state'] = strtoupper(substr(trim($state), 0, 2));
+        }
+
+        if (!empty($cleanZip) && strlen($cleanZip) === 8) {
+            $address['postal_code'] = $cleanZip;
+        }
+
+        return $address;
+    }
+
+    /**
+     * Gera um identificador UUID v4 para Idempotency-Key
+     *
+     * @return string
+     */
+    protected function generate_uuid()
+    {
+        $data = random_bytes(16);
+        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
+        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+    }
+}
