@@ -147,6 +147,17 @@ class Cora extends App_Controller
     }
 
     /**
+     * Alias para visualização do boleto bancário (boleto_view)
+     *
+     * @param int|string $invoice_id
+     * @param string $txid
+     */
+    public function boleto_view($invoice_id = null, $txid = null)
+    {
+        return $this->boleto($invoice_id, $txid);
+    }
+
+    /**
      * Download seguro do PDF do Boleto Oficial da Cora
      *
      * @param int|string $invoice_id

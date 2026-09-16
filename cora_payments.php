@@ -129,7 +129,10 @@ function cora_payments_render_admin_ui()
                         <li><strong>Aplicação e Client ID:</strong> Crie uma aplicação (Ex: "Perfex CRM") e copie o <strong>Client ID</strong> gerado.</li>
                         <li><strong>Certificados mTLS:</strong> Baixe o certificado público (<code>.pem</code> ou <code>.crt</code>) e a chave privada (<code>.key</code>). <em>Atenção: Salve o arquivo .key de imediato, pois a Cora o exibe apenas uma vez.</em></li>
                         <li><strong>Compartilhamento Automático:</strong> Os certificados e o Client ID configurados na aba <strong>Pix Banco Cora</strong> são compartilhados automaticamente com a aba <strong>Boleto Bancário Cora</strong>! Você não precisa preencher duas vezes.</li>
-                        <li><strong>Cadastro do Webhook:</strong> Copie a <strong>URL do Webhook Oficial</strong> exibida abaixo e cadastre nas notificações de Webhooks no portal da Cora para liquidação em tempo real.</li>
+                        <li><strong>Cadastro dos Dois Webhooks na Cora:</strong><br>
+                            &bull; <em>Webhook Pix:</em> Vinculado à Chave Pix para conciliação das transferências instantâneas.<br>
+                            &bull; <em>Webhook Boletos (v2):</em> No portal <a href="https://app.cora.com.br" target="_blank">app.cora.com.br</a> em <em>Integrações &gt; Webhooks</em>, cadastre a URL oficial com os eventos <strong>invoice.paid</strong> e <strong>invoice.cancelled</strong>.
+                        </li>
                     </ol>
                 </div>
             </div>
@@ -213,4 +216,29 @@ function cora_payments_render_admin_ui()
     });
     </script>
     <?php
+}
+
+/**
+ * Cancelamento Automático no Perfex (Hook de Limpeza)
+ * Para evitar que o cliente pague um boleto que foi cancelado pela sua equipe no CRM,
+ * aciona a API Cora (DELETE /v2/invoices/{id}) e atualiza o status para CANCELLED.
+ */
+hooks()->add_action('after_invoice_cancelled', 'cora_cancel_invoice_on_bank');
+
+function cora_cancel_invoice_on_bank($invoice_id)
+{
+    $CI = &get_instance();
+    $transacao = $CI->db->where('invoice_id', $invoice_id)
+        ->where('status', 'PENDING')
+        ->get(db_prefix() . 'cora_transactions')
+        ->row();
+
+    if ($transacao && !empty($transacao->cora_invoice_id)) {
+        $CI->load->library('cora_payments/cora_api');
+        $CI->cora_api->cancelar_cobranca($transacao->cora_invoice_id);
+        $CI->db->where('id', $transacao->id)->update(db_prefix() . 'cora_transactions', [
+            'status' => 'CANCELLED',
+        ]);
+        log_activity('Boleto Cora cancelado no banco após cancelamento da Fatura #' . $invoice_id);
+    }
 }

@@ -548,24 +548,21 @@ class Cora_api
                 'type'     => (strlen($doc) > 11) ? 'CNPJ' : 'CPF',
             ],
             'phone'    => !empty($phone) ? $phone : null,
+            'address'  => $this->montar_endereco_cliente($invoice),
         ];
 
-        // Endereço do cliente (se disponível)
-        $address = $this->montar_endereco_cliente($invoice);
-        if (!empty($address)) {
-            $customerObj['address'] = $address;
-        }
+        // 2. Faturas Já Vencidas no Perfex (Tolerância Anti-Erro 422 na Cora)
+        $hoje = date('Y-m-d');
+        $data_vencimento = !empty($invoice->duedate) ? $invoice->duedate : $hoje;
 
-        // Data de Vencimento
-        $dueDate = !empty($invoice->duedate) ? $invoice->duedate : date('Y-m-d', strtotime('+3 days'));
-        // Se a data de vencimento for anterior a hoje, ajusta para hoje
-        if (strtotime($dueDate) < strtotime(date('Y-m-d'))) {
-            $dueDate = date('Y-m-d');
+        // Se a fatura do Perfex estiver vencida, coloca vencimento para o próprio dia (ou D+1)
+        if (strtotime($data_vencimento) < strtotime($hoje)) {
+            $data_vencimento = $hoje;
         }
 
         // Condições de Pagamento (Multa e Juros)
         $paymentTerms = [
-            'due_date' => $dueDate,
+            'due_date' => $data_vencimento,
         ];
 
         // Multa por atraso (%)
@@ -777,21 +774,85 @@ class Cora_api
     }
 
     /**
-     * Monta estrutura de endereço do cliente a partir da fatura
+     * Cancelamento de Boleto no Banco Cora via DELETE /v2/invoices/{id}
+     *
+     * @param string $coraInvoiceId ID da fatura na Cora (inv_...)
+     * @return bool
+     */
+    public function cancelar_cobranca($coraInvoiceId)
+    {
+        try {
+            $token = $this->get_token('cora_boleto');
+            if (!$token) {
+                return false;
+            }
+
+            $certs = $this->get_cert_paths('cora_boleto');
+            $url   = $this->get_base_url('cora_boleto') . '/v2/invoices/' . urlencode($coraInvoiceId);
+
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_CUSTOMREQUEST  => 'DELETE',
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_SSLCERT        => $certs['cert'],
+                CURLOPT_SSLKEY         => $certs['key'],
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_HTTPHEADER     => [
+                    'Authorization: Bearer ' . $token,
+                    'Accept: application/json',
+                ],
+                CURLOPT_TIMEOUT        => 20,
+            ]);
+
+            $response  = curl_exec($ch);
+            $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            if ($curlError) {
+                log_activity('Erro cURL ao cancelar boleto Cora ' . $coraInvoiceId . ': ' . $curlError);
+                return false;
+            }
+
+            return ($httpCode === 200 || $httpCode === 204);
+        } catch (Exception $e) {
+            log_activity('Exceção ao cancelar boleto Cora ' . $coraInvoiceId . ': ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 3. Endereço Completo do Cliente para Registro do Boleto (Regulamentação Bacen / CIP)
+     * Garante o preenchimento de todos os campos obrigatórios para evitar erro 400/422 na emissão.
      *
      * @param object $invoice
-     * @return array|null
+     * @return array
      */
     protected function montar_endereco_cliente($invoice)
     {
-        $street   = !empty($invoice->billing_street) ? $invoice->billing_street : ($invoice->client->address ?? '');
-        $city     = !empty($invoice->billing_city) ? $invoice->billing_city : ($invoice->client->city ?? '');
-        $state    = !empty($invoice->billing_state) ? $invoice->billing_state : ($invoice->client->state ?? '');
-        $zip      = !empty($invoice->billing_zip) ? $invoice->billing_zip : ($invoice->client->zip ?? '');
-        $cleanZip = preg_replace('/\D/', '', $zip);
+        $street = !empty($invoice->billing_street) 
+            ? $invoice->billing_street 
+            : (!empty($invoice->client->address) ? $invoice->client->address : 'Nao informado');
 
-        if (empty($street) && empty($city)) {
-            return null;
+        $city = !empty($invoice->billing_city) 
+            ? $invoice->billing_city 
+            : (!empty($invoice->client->city) ? $invoice->client->city : 'Brasilia');
+
+        $stateRaw = !empty($invoice->billing_state) 
+            ? $invoice->billing_state 
+            : (!empty($invoice->client->state) ? $invoice->client->state : 'DF');
+        $state = strtoupper(substr(trim($stateRaw), 0, 2));
+        if (empty($state)) {
+            $state = 'DF';
+        }
+
+        $zipRaw = !empty($invoice->billing_zip) 
+            ? $invoice->billing_zip 
+            : (!empty($invoice->client->zip) ? $invoice->client->zip : '70000000');
+        $postCode = preg_replace('/\D/', '', $zipRaw);
+        if (empty($postCode) || strlen($postCode) < 8) {
+            $postCode = '70000000';
         }
 
         // Tenta separar número caso esteja no formato "Rua Nome, 123"
@@ -801,24 +862,14 @@ class Cora_api
             $street = trim(preg_replace('/,\s*(\d+.*)$/', '', $street));
         }
 
-        $address = [
-            'street' => mb_substr($street, 0, 100, 'UTF-8') ?: 'Não informado',
-            'number' => mb_substr($number, 0, 20, 'UTF-8'),
+        return [
+            'street'    => mb_substr($street, 0, 100, 'UTF-8') ?: 'Nao informado',
+            'number'    => mb_substr($number, 0, 20, 'UTF-8'),
+            'district'  => 'Centro',
+            'city'      => mb_substr($city, 0, 60, 'UTF-8'),
+            'state'     => $state,
+            'post_code' => $postCode,
         ];
-
-        if (!empty($city)) {
-            $address['city'] = mb_substr($city, 0, 60, 'UTF-8');
-        }
-
-        if (!empty($state)) {
-            $address['state'] = strtoupper(substr(trim($state), 0, 2));
-        }
-
-        if (!empty($cleanZip) && strlen($cleanZip) === 8) {
-            $address['postal_code'] = $cleanZip;
-        }
-
-        return $address;
     }
 
     /**

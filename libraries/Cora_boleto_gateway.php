@@ -154,28 +154,22 @@ class Cora_boleto_gateway extends App_gateway
         }
 
         try {
-            // Verifica se já existe um boleto gerado para a fatura que ainda esteja pendente e com PDF válido
-            $this->ci->db->where('invoice_id', $invoice->id);
-            $this->ci->db->where('type', 'BOLETO');
-            $this->ci->db->where_in('status', ['PENDING', 'OPEN', 'ATIVA']);
-            $this->ci->db->where('amount', $amount);
-            $this->ci->db->order_by('id', 'DESC');
-            $existing = $this->ci->db->get(db_prefix() . 'cora_transactions')->row();
+            // 1. Reutilização de Boletos Ativos (Anti-Duplicação no DDA)
+            $existente = $this->ci->db->where('invoice_id', $invoice->id)
+                ->where('type', 'BOLETO')
+                ->where('status', 'PENDING')
+                ->get(db_prefix() . 'cora_transactions')
+                ->row();
 
-            $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
-
-            if ($existing && !empty($existing->pdf_url)) {
-                $createdAt = strtotime($existing->created_at);
-                // Se o boleto foi criado há menos de 7 dias, reutiliza
-                if ((time() - $createdAt) < (7 * 86400)) {
-                    if ($redirectMode === 'pdf') {
-                        redirect($existing->pdf_url);
-                        return;
-                    } else {
-                        redirect(site_url('cora_payments/cora/boleto/' . $invoice->id . '/' . $existing->txid));
-                        return;
-                    }
+            // Se já existe e a URL do PDF está salva, reaproveita sem emitir outro
+            if ($existente && !empty($existente->pdf_url)) {
+                $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
+                if ($redirectMode === 'pdf') {
+                    redirect($existente->pdf_url);
+                } else {
+                    redirect(site_url('cora_payments/cora/boleto_view/' . $invoice->id . '/' . $existente->txid));
                 }
+                return;
             }
 
             // Emite novo boleto híbrido na Cora

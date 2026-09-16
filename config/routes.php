@@ -15,6 +15,7 @@ $route['cora_payments/cora/pay/(:num)/(:any)'] = 'cora_payments/cora/pay/$1/$2';
 
 // Tela de visualização / download de Boleto Híbrido
 $route['cora_payments/cora/boleto/(:num)/(:any)']          = 'cora_payments/cora/boleto/$1/$2';
+$route['cora_payments/cora/boleto_view/(:num)/(:any)']     = 'cora_payments/cora/boleto_view/$1/$2';
 $route['cora_payments/cora/download_boleto/(:num)/(:any)'] = 'cora_payments/cora/download_boleto/$1/$2';
 
 // Endpoint de Polling para verificação assíncrona do status
