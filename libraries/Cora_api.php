@@ -117,7 +117,8 @@ class Cora_api
      */
     public function get_certs_dir()
     {
-        $certsDir = module_dir_path('cora_payments', 'certs');
+        $moduleName = defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : 'cora_payments';
+        $certsDir = module_dir_path($moduleName, 'certs');
         if (!is_dir($certsDir)) {
             @mkdir($certsDir, 0700, true);
             @file_put_contents($certsDir . DIRECTORY_SEPARATOR . '.htaccess', "<IfModule authz_core_module>\n    Require all denied\n</IfModule>\n<IfModule !authz_core_module>\n    Deny from all\n</IfModule>\n");

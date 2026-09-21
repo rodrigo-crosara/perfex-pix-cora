@@ -115,16 +115,60 @@ class Pix_payload
     }
 
     /**
+     * Detecta automaticamente o tipo da Chave Pix com base no formato
+     *
+     * @param string $key
+     * @return string 'email', 'aleatoria', 'cnpj', 'cpf', 'phone'
+     */
+    public static function detect_key_type($key)
+    {
+        $key = trim((string)$key);
+        if (strpos($key, '@') !== false) {
+            return 'email';
+        }
+        // UUID v4 format (8-4-4-4-12)
+        if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $key)) {
+            return 'aleatoria';
+        }
+        $digits = preg_replace('/\D/', '', $key);
+        if (strlen($digits) === 14) {
+            return 'cnpj';
+        }
+        if (strpos($key, '+') === 0) {
+            return 'phone';
+        }
+        if (strlen($digits) === 11) {
+            // Se possui pontuação de CPF (ex: 123.456.789-00)
+            if (strpos($key, '.') !== false || strpos($key, '-') !== false) {
+                return 'cpf';
+            }
+            // Celular brasileiro com DDD (ex: 61986314955) possui 11 dígitos e o 3º dígito é 9
+            if (substr($digits, 2, 1) === '9') {
+                return 'phone';
+            }
+            return 'cpf';
+        }
+        if (strlen($digits) === 10) {
+            return 'phone';
+        }
+        return 'cnpj';
+    }
+
+    /**
      * Higieniza e formata a chave Pix conforme a regulamentação do Bacen
      *
      * @param string $key Chave informada
-     * @param string $type Tipo: 'cpf', 'cnpj', 'phone'/'telefone', 'email', 'aleatoria'
+     * @param string $type Tipo: 'auto', 'cpf', 'cnpj', 'phone'/'telefone', 'email', 'aleatoria'
      * @return string
      */
-    public static function sanitize_key($key, $type = 'cnpj')
+    public static function sanitize_key($key, $type = 'auto')
     {
         $key  = trim((string)$key);
         $type = strtolower(trim((string)$type));
+
+        if (empty($type) || $type === 'auto') {
+            $type = self::detect_key_type($key);
+        }
 
         switch ($type) {
             case 'cpf':
@@ -223,6 +267,9 @@ class Pix_payload
         $merchantCity,
         $description = ''
     ) {
+        if (empty($keyType) || $keyType === 'auto') {
+            $keyType = self::detect_key_type($pixKey);
+        }
         $cleanKey  = self::sanitize_key($pixKey, $keyType);
         $cleanName = self::sanitize_text($merchantName, 25, 'RECEBEDOR');
         $cleanCity = self::sanitize_text($merchantCity, 15, 'SAO PAULO');

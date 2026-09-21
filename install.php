@@ -82,7 +82,8 @@ if ($CI->db->table_exists($legacyTable)) {
 }
 
 // 3. Estrutura e Blindagem de Segurança do Diretório de Certificados mTLS
-$certsDir = module_dir_path('cora_payments', 'certs');
+$moduleName = defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : basename(__DIR__);
+$certsDir = module_dir_path($moduleName, 'certs');
 if (!is_dir($certsDir)) {
     @mkdir($certsDir, 0700, true);
 } else {
@@ -132,6 +133,11 @@ if (defined('APPPATH')) {
     if (file_exists($orphanProxy)) {
         @unlink($orphanProxy);
     }
+}
+
+// 5. Sincronização inicial de modos de pagamento para PDF
+if (function_exists('cora_payments_sync_payment_modes')) {
+    cora_payments_sync_payment_modes();
 }
 
 

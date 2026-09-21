@@ -390,17 +390,16 @@ function cora_payments_admin_invoice_duplicate_fix()
                     var btnGroup = select.closest('.bootstrap-select') || (select.parentNode ? select.parentNode.querySelector('.bootstrap-select') : null);
                     if (btnGroup) {
                         var menuItems = btnGroup.querySelectorAll('.dropdown-menu li');
-                        var foundFirst = false;
                         menuItems.forEach(function(li) {
-                            var a = li.querySelector('a');
-                            if (a) {
-                                var text = a.textContent.trim();
-                                if (text === 'Pix Banco Cora' || text.indexOf('Pix Banco Cora') !== -1) {
-                                    if (!foundFirst) {
-                                        foundFirst = true; // O primeiro fica visível!
-                                    } else {
-                                        li.style.display = 'none'; // Qualquer duplicata fica oculta!
-                                    }
+                            var origIdx = li.getAttribute('data-original-index');
+                            if (origIdx !== null) {
+                                var idx = parseInt(origIdx, 10);
+                                if (idx === numericOpt.index) {
+                                    li.classList.add('hidden');
+                                    li.style.display = 'none';
+                                } else if (idx === gatewayOpt.index) {
+                                    li.classList.remove('hidden');
+                                    li.style.display = '';
                                 }
                             }
                         });

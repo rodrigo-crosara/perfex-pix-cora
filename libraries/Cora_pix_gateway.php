@@ -14,6 +14,12 @@ defined('BASEPATH') or exit('No direct script access allowed');
 class Cora_pix_gateway extends App_gateway
 {
     /**
+     * Instância do CodeIgniter
+     * @var object
+     */
+    protected $ci;
+
+    /**
      * Instância do helper central Cora_api
      * @var Cora_api
      */
@@ -22,6 +28,8 @@ class Cora_pix_gateway extends App_gateway
     public function __construct()
     {
         parent::__construct();
+
+        $this->ci = &get_instance();
 
         $this->setId('cora_pix');
         $this->setName('Pix Banco Cora');
@@ -64,41 +72,31 @@ class Cora_pix_gateway extends App_gateway
 
         $this->setSettings([
             [
-                'name'          => 'operation_mode',
-                'type'          => 'select',
-                'label'         => 'Modo de Operação do Pix',
-                'default_value' => 'api_cora',
-                'options'       => [
-                    [
-                        'id'   => 'api_cora',
-                        'name' => 'Modo Automático (API Cora Pro com mTLS e Baixa por Webhook)',
-                    ],
-                    [
-                        'id'   => 'manual',
-                        'name' => 'Modo Pix Manual (Sem API Cora - QR Code Estático e Baixa Manual)',
-                    ],
-                ],
-                'info'          => '<p class="text-info"><i class="fa fa-info-circle"></i> <strong>Dica de Contingência:</strong> Caso sua conta Cora não possua o plano Cora Pro ativo, selecione <strong>Modo Pix Manual</strong>. O sistema gerará o QR Code com o valor exato da fatura e permitirá baixa manual pela sua equipe financeira após envio do comprovante.</p>',
+                'name'          => 'modo_manual',
+                'type'          => 'yes_no',
+                'label'         => 'Ativar Modo Pix Manual (Sem API Cora Pro - Baixa Manual)',
+                'default_value' => 1,
+                'info'          => '<p class="text-info"><i class="fa fa-info-circle"></i> <strong>Ative esta opção se sua conta Cora não possui o plano Cora Pro (API).</strong> O sistema gerará o QR Code com a sua Chave Pix configurada abaixo e sua equipe fará a baixa manual após receber o comprovante. Certificados mTLS e Client ID não são necessários!</p>',
             ],
             [
-                'name'          => 'pix_manual_key_type',
-                'type'          => 'select',
-                'label'         => '[Modo Manual] Tipo da Chave Pix',
-                'default_value' => 'cnpj',
-                'options'       => [
-                    ['id' => 'cnpj',      'name' => 'CNPJ'],
-                    ['id' => 'cpf',       'name' => 'CPF'],
-                    ['id' => 'email',     'name' => 'E-mail'],
-                    ['id' => 'phone',     'name' => 'Telefone (Celular com DDD)'],
-                    ['id' => 'aleatoria', 'name' => 'Chave Aleatória (EVP)'],
-                ],
-                'info'          => '<p class="text-muted">Selecione o formato da sua chave Pix no banco.</p>',
+                'name'          => 'embed_on_invoice',
+                'type'          => 'yes_no',
+                'label'         => 'Exibir QR Code e Pix Copia e Cola Diretamente na Fatura Online (Sem precisar clicar em "Pagar agora")',
+                'default_value' => 1,
+                'info'          => '<p class="text-info"><i class="fa fa-bolt"></i> <strong>Recomendado:</strong> Renderiza o QR Code, botão de Copiar Código e botão do WhatsApp diretamente na tela da fatura aberta pelo cliente, permitindo pagamento imediato com alta taxa de conversão.</p>',
+            ],
+            [
+                'name'          => 'show_on_pdf',
+                'type'          => 'yes_no',
+                'label'         => 'Exibir Chave Pix e WhatsApp no PDF da Fatura (Ao "Baixar" fatura)',
+                'default_value' => 1,
+                'info'          => '<p class="text-muted">Inclui automaticamente as instruções de pagamento via Pix com sua Chave e WhatsApp no documento PDF gerado ao baixar a fatura.</p>',
             ],
             [
                 'name'  => 'pix_manual_key',
                 'type'  => 'input',
                 'label' => '[Modo Manual] Chave Pix',
-                'info'  => '<p class="text-muted">Informe sua chave Pix (ex: CNPJ sem pontuação, telefone com DDD, e-mail ou chave aleatória).</p>',
+                'info'  => '<p class="text-muted">Informe sua chave Pix (ex: CNPJ, CPF, Celular com DDD, E-mail ou Chave Aleatória). O sistema detecta o tipo automaticamente!</p>',
             ],
             [
                 'name'  => 'pix_manual_merchant_name',
@@ -193,6 +191,13 @@ class Cora_pix_gateway extends App_gateway
         $invoice = $data['invoice'];
         $amount  = (float)$data['amount'];
 
+        // Validação de valor mínimo: impede geração de Pix com valor zero ou negativo
+        if ($amount <= 0) {
+            set_alert('warning', 'Não é possível gerar um código Pix para uma fatura com valor zero ou negativo.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+            return;
+        }
+
         // 0. Bloqueio de Faturas em Rascunho (STATUS_DRAFT = 6)
         $statusDraft = defined('Invoices_model::STATUS_DRAFT') ? Invoices_model::STATUS_DRAFT : 6;
         if ((int)$invoice->status === (int)$statusDraft) {
@@ -223,17 +228,32 @@ class Cora_pix_gateway extends App_gateway
             return;
         }
 
-        $operationMode = $this->getSetting('operation_mode') ?: 'api_cora';
+        $manualPixKey = trim((string)$this->getSetting('pix_manual_key'));
+        if (empty($manualPixKey)) {
+            $manualPixKey = trim((string)$this->getSetting('chave_pix'));
+        }
+
+        $apiClientId  = trim((string)$this->cora_api->get_credential('client_id', 'cora_pix'));
+        $apiChavePix  = trim((string)$this->cora_api->get_credential('chave_pix', 'cora_pix'));
+        $apiCertRaw   = trim((string)$this->cora_api->get_credential('cert_content', 'cora_pix'));
+        $apiKeyRaw    = trim((string)$this->cora_api->get_credential('key_content', 'cora_pix'));
+        $certsDir     = $this->cora_api->get_certs_dir();
+        $hasCerts     = (file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem') && file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_key.key'));
+
+        $isManualSetting   = ((int)$this->getSetting('modo_manual') === 1) || ($this->getSetting('operation_mode') === 'manual');
+        $hasApiCredentials = (!empty($apiClientId) && !empty($apiChavePix) && (!empty($apiCertRaw) || $hasCerts) && (!empty($apiKeyRaw) || $hasCerts));
+
+        // Determinação Inteligente do Modo:
+        // 1. Se o administrador ativou 'modo_manual' nas opções; OU
+        // 2. Se a chave manual está informada e o módulo NÃO possui credenciais completas da API Cora Pro configuradas.
+        $isManual = $isManualSetting || (!$hasApiCredentials && !empty($manualPixKey));
 
         // =========================================================================
         // MODO MANUAL (Pix Estático sem API Cora / Sem plano Pro)
         // =========================================================================
-        if ($operationMode === 'manual') {
+        if ($isManual) {
             try {
-                $pixKey = trim((string)$this->getSetting('pix_manual_key'));
-                if (empty($pixKey)) {
-                    $pixKey = trim((string)$this->getSetting('chave_pix'));
-                }
+                $pixKey = $manualPixKey;
 
                 if (empty($pixKey)) {
                     set_alert('danger', 'A Chave Pix do Modo Manual não foi configurada nas opções do módulo pelo administrador.');
@@ -241,7 +261,15 @@ class Cora_pix_gateway extends App_gateway
                     return;
                 }
 
-                $keyType      = $this->getSetting('pix_manual_key_type') ?: 'cnpj';
+                if (!class_exists('Pix_payload', false)) {
+                    $this->ci->load->library('cora_payments/pix_payload');
+                }
+
+                $keyType = $this->getSetting('pix_manual_key_type');
+                if (empty($keyType) || $keyType === 'auto') {
+                    $keyType = Pix_payload::detect_key_type($pixKey);
+                }
+
                 $merchantName = trim((string)$this->getSetting('pix_manual_merchant_name'));
                 if (empty($merchantName)) {
                     $merchantName = get_option('companyname') ?: 'EMPRESA';

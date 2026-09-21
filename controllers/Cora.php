@@ -47,8 +47,15 @@ class Cora extends App_Controller
         if (!empty($txid)) {
             $hash      = (string)$hash_or_txid;
             $cleanTxid = (string)$txid;
-        } else {
-            $cleanTxid = (string)$hash_or_txid;
+        } elseif (!empty($hash_or_txid)) {
+            // Se o segundo parâmetro tiver 32 caracteres hexadecimais, é o hash de segurança da fatura!
+            if (preg_match('/^[a-f0-9]{32}$/i', (string)$hash_or_txid)) {
+                $hash      = (string)$hash_or_txid;
+                $cleanTxid = null; // txid omitido na URL
+            } else {
+                $cleanTxid = (string)$hash_or_txid;
+                $hash      = null;
+            }
         }
 
         return [$invoice_id, $hash, $cleanTxid];
@@ -100,7 +107,7 @@ class Cora extends App_Controller
     {
         list($invoice_id, $hash, $txid) = $this->resolve_route_params($invoice_id, $hash_or_txid, $txid);
 
-        if (empty($invoice_id) || empty($txid)) {
+        if (empty($invoice_id)) {
             show_404();
             return;
         }
@@ -121,13 +128,91 @@ class Cora extends App_Controller
             return;
         }
 
+        // Fatura cancelada (Status 5 = STATUS_CANCELLED no Perfex CRM)
+        if ((int)$invoice->status === 5) {
+            set_alert('warning', 'Esta fatura foi cancelada e não pode receber pagamentos.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+            return;
+        }
+
         // Busca transação local
-        $this->db->where('invoice_id', $invoice_id);
-        $this->db->where('txid', $txid);
-        $transaction = $this->db->get(db_prefix() . 'cora_transactions')->row();
+        $transaction = null;
+        if (!empty($txid)) {
+            $this->db->where('invoice_id', $invoice_id);
+            $this->db->where('txid', $txid);
+            $transaction = $this->db->get(db_prefix() . 'cora_transactions')->row();
+        } else {
+            $this->db->where('invoice_id', $invoice_id);
+            $this->db->where('type', 'PIX');
+            $this->db->where_in('status', ['PENDING', 'ATIVA']);
+            $this->db->order_by('id', 'DESC');
+            $transaction = $this->db->get(db_prefix() . 'cora_transactions')->row();
+        }
+
+        // Se não encontrar transação prévia e a fatura não estiver paga, gera uma dinamicamente!
+        if (!$transaction) {
+            $amountToPay = (float)($invoice->total_left_to_pay ?? $invoice->total);
+            if ($amountToPay <= 0) {
+                set_alert('warning', 'Esta fatura não possui saldo a pagar.');
+                redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+                return;
+            }
+
+            $this->load->library('cora_payments/cora_pix_gateway');
+            $pixKey = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_key'));
+            if (empty($pixKey)) {
+                $pixKey = trim((string)$this->cora_pix_gateway->getSetting('chave_pix'));
+            }
+
+            if (!empty($pixKey)) {
+                $txid = 'FAT' . $invoice->id . strtoupper(substr(md5(uniqid((string)$invoice->id, true)), 0, 8));
+                if (strlen($txid) > 25) {
+                    $txid = substr($txid, 0, 25);
+                }
+
+                $merchantName = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_merchant_name'));
+                if (empty($merchantName)) {
+                    $merchantName = get_option('companyname') ?: 'EMPRESA';
+                }
+                $merchantCity = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_merchant_city')) ?: 'BRASILIA';
+
+                if (!class_exists('Pix_payload', false)) {
+                    $this->load->library('cora_payments/pix_payload');
+                }
+                $keyType = $this->cora_pix_gateway->getSetting('pix_manual_key_type');
+                if (empty($keyType) || $keyType === 'auto') {
+                    $keyType = Pix_payload::detect_key_type($pixKey);
+                }
+
+                $pixPayload = Pix_payload::generate_payload(
+                    $pixKey,
+                    $keyType,
+                    $amountToPay,
+                    $txid,
+                    $merchantName,
+                    $merchantCity,
+                    'Fatura #' . format_invoice_number($invoice->id)
+                );
+
+                $this->db->insert(db_prefix() . 'cora_transactions', [
+                    'invoice_id'     => (int)$invoice->id,
+                    'type'           => 'PIX',
+                    'txid'           => $txid,
+                    'amount'         => (float)$amountToPay,
+                    'pix_copia_cola' => $pixPayload,
+                    'status'         => 'PENDING',
+                    'created_at'     => date('Y-m-d H:i:s'),
+                ]);
+
+                $this->db->where('invoice_id', $invoice_id);
+                $this->db->where('txid', $txid);
+                $transaction = $this->db->get(db_prefix() . 'cora_transactions')->row();
+            }
+        }
 
         if (!$transaction) {
-            show_error('Transação de pagamento não encontrada para esta fatura.', 404);
+            set_alert('danger', 'Chave Pix não configurada nas opções do módulo para gerar a cobrança.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;
         }
 
@@ -143,8 +228,8 @@ class Cora extends App_Controller
 
         // Identifica o modo de operação configurado no gateway Pix
         $this->load->library('cora_payments/cora_pix_gateway');
-        $operationMode = $this->cora_pix_gateway->getSetting('operation_mode') ?: 'api_cora';
-        $isManual      = ($operationMode === 'manual');
+        $isManualSetting = ((int)$this->cora_pix_gateway->getSetting('modo_manual') === 1) || ($this->cora_pix_gateway->getSetting('operation_mode') === 'manual');
+        $isManual        = (strpos($txid, 'FAT') === 0) || $isManualSetting;
 
         $merchantName = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_merchant_name'));
         if (empty($merchantName)) {
@@ -156,7 +241,14 @@ class Cora extends App_Controller
             $pixKey = trim((string)$this->cora_pix_gateway->getSetting('chave_pix'));
         }
 
-        $keyType      = $this->cora_pix_gateway->getSetting('pix_manual_key_type') ?: 'cnpj';
+        if (!class_exists('Pix_payload', false)) {
+            $this->load->library('cora_payments/pix_payload');
+        }
+
+        $keyType = $this->cora_pix_gateway->getSetting('pix_manual_key_type');
+        if (empty($keyType) || $keyType === 'auto') {
+            $keyType = Pix_payload::detect_key_type($pixKey);
+        }
         $instructions = $this->cora_pix_gateway->getSetting('pix_manual_instructions');
         $whatsapp     = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_whatsapp'));
         $companyEmail = get_option('invoice_company_email') ?: get_option('company_email');

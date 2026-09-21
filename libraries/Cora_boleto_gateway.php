@@ -12,6 +12,12 @@ defined('BASEPATH') or exit('No direct script access allowed');
 class Cora_boleto_gateway extends App_gateway
 {
     /**
+     * Instância do CodeIgniter
+     * @var object
+     */
+    protected $ci;
+
+    /**
      * Instância do helper central Cora_api
      * @var Cora_api
      */
@@ -20,6 +26,8 @@ class Cora_boleto_gateway extends App_gateway
     public function __construct()
     {
         parent::__construct();
+
+        $this->ci = &get_instance();
 
         $this->setId('cora_boleto');
         $this->setName('Boleto Bancário Cora (com Pix)');
@@ -106,15 +114,11 @@ class Cora_boleto_gateway extends App_gateway
                 'info'          => '<p class="text-muted">Quantidade de dias corridos após o vencimento para expiração/baixa do boleto (padrão bancário: 29 dias).</p>',
             ],
             [
-                'name'          => 'redirect_mode',
-                'type'          => 'select',
-                'label'         => 'Modo de Redirecionamento após Emissão',
-                'default_value' => 'pdf',
-                'options'       => [
-                    ['id' => 'pdf',  'name' => 'Redirecionar diretamente para o PDF Oficial da Cora'],
-                    ['id' => 'view', 'name' => 'Exibir página interna com código de barras, QR Code Pix e download'],
-                ],
-                'info'          => '<p class="text-muted">Escolha se o cliente é enviado diretamente para o PDF do boleto ou para a tela interativa do módulo.</p>',
+                'name'          => 'redirect_to_pdf',
+                'type'          => 'yes_no',
+                'label'         => 'Redirecionar diretamente para o PDF Oficial da Cora',
+                'default_value' => 1,
+                'info'          => '<p class="text-muted">Ativado: envia o cliente diretamente para o PDF do boleto gerado pela Cora. Desativado: exibe a página interna interativa do módulo com linha digitável e QR Code.</p>',
             ],
             [
                 'name'          => 'currencies',
@@ -141,6 +145,13 @@ class Cora_boleto_gateway extends App_gateway
     {
         $invoice = $data['invoice'];
         $amount  = (float)$data['amount'];
+
+        // Validação de valor mínimo: impede emissão de boleto com valor zero ou negativo
+        if ($amount <= 0) {
+            set_alert('warning', 'Não é possível emitir um boleto bancário para uma fatura com valor zero ou negativo.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+            return;
+        }
 
         // 0. Bloqueio de Faturas em Rascunho (STATUS_DRAFT = 6)
         $statusDraft = defined('Invoices_model::STATUS_DRAFT') ? Invoices_model::STATUS_DRAFT : 6;
@@ -202,7 +213,8 @@ class Cora_boleto_gateway extends App_gateway
                 ->get(db_prefix() . 'cora_transactions')
                 ->row();
 
-            $redirectMode = $this->getSetting('redirect_mode') ?: 'pdf';
+            $redirectSetting = $this->getSetting('redirect_to_pdf');
+            $redirectToPdf = ($redirectSetting === null || (int)$redirectSetting === 1 || $this->getSetting('redirect_mode') === 'pdf');
 
             // Se já existe e a URL do PDF está salva, valida se o vencimento original ainda é válido
             if ($existente && !empty($existente->pdf_url)) {
@@ -211,7 +223,7 @@ class Cora_boleto_gateway extends App_gateway
 
                 // Se a fatura venceu após a emissão do boleto anterior, emite um novo atualizado
                 if (strtotime($vencimento) >= strtotime($hoje)) {
-                    if ($redirectMode === 'pdf') {
+                    if ($redirectToPdf) {
                         redirect($existente->pdf_url);
                     } else {
                         redirect(site_url('cora_payments/cora/boleto_view/' . $invoice->id . '/' . $invoice->hash . '/' . $existente->txid));
@@ -251,7 +263,7 @@ class Cora_boleto_gateway extends App_gateway
             set_alert('success', 'Boleto Bancário emitido com sucesso!');
 
             // Redirecionamento conforme preferência do administrador
-            if ($redirectMode === 'pdf' && !empty($boleto['pdf_url'])) {
+            if ($redirectToPdf && !empty($boleto['pdf_url'])) {
                 redirect($boleto['pdf_url']);
                 return;
             }
