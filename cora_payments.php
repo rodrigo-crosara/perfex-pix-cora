@@ -10,7 +10,9 @@ Requires at least: 2.3.*
 Author: Perfex CRM Integration Team
 */
 
-define('CORA_PAYMENTS_MODULE_NAME', 'cora_payments');
+if (!defined('CORA_PAYMENTS_MODULE_NAME')) {
+    define('CORA_PAYMENTS_MODULE_NAME', basename(__DIR__));
+}
 
 /**
  * Hook de Ativação do Módulo
@@ -101,58 +103,75 @@ function cora_payments_csrf_exclude($uris)
 }
 
 /**
- * Validação de Moeda e Disponibilidade do Gateway:
- * - Oculta Pix e Boleto Cora para faturas que não sejam em Real (BRL).
- * - Oculta Boleto Cora caso as credenciais da API Cora Pro (mTLS) não estejam configuradas.
+ * Validação de Moeda e Disponibilidade do Gateway na Fatura:
+ * - Oculta Pix e Boleto Cora na visualização/pagamento de faturas que não sejam em Real (BRL).
+ * - Oculta Boleto Cora na fatura caso as credenciais da API Cora Pro (mTLS) não estejam configuradas.
+ * - IMPORTANTE: Quando $invoice é nulo ou vazio (ex: tela de Configurações do Admin / Setup > Settings > Payment Gateways),
+ *   o filtro NUNCA deve ocultar os gateways, permitindo que as abas e campos de configuração sejam exibidos normalmente.
  */
 hooks()->add_filter('is_payment_gateway_available', 'cora_payments_check_currency_available', 10, 3);
 
-function cora_payments_check_currency_available($available, $gateway, $invoice)
+function cora_payments_check_currency_available($available, $gateway, $invoice = null)
 {
+    // 1. Se o gateway já está desativado pelo administrador nas opções do Perfex, mantém desativado
     if ($available === false) {
         return false;
+    }
+
+    // 2. REGRA CRÍTICA: Se não há fatura sendo avaliada (ex: tela de Configurações do Perfex / Admin Settings),
+    // NUNCA aplica restrições de moeda ou credenciais, garantindo que as abas de configuração apareçam!
+    if (empty($invoice) || (!is_object($invoice) && !is_array($invoice))) {
+        return $available;
+    }
+
+    // Se for objeto sem dados básicos de fatura, não interfere
+    if (is_object($invoice) && empty($invoice->id) && empty($invoice->currency) && empty($invoice->currency_name)) {
+        return $available;
     }
 
     $gatewayId = is_array($gateway) ? ($gateway['id'] ?? '') : ($gateway->id ?? '');
 
     if ($gatewayId === 'cora_pix' || $gatewayId === 'cora_boleto') {
         $currencyName = '';
-        if (isset($invoice->currency_name) && !empty($invoice->currency_name)) {
-            $currencyName = $invoice->currency_name;
-        } elseif (isset($invoice->currency)) {
-            if (function_exists('get_currency')) {
+
+        if (is_object($invoice)) {
+            if (!empty($invoice->currency_name)) {
+                $currencyName = $invoice->currency_name;
+            } elseif (!empty($invoice->currency) && function_exists('get_currency')) {
                 $currencyObj = get_currency($invoice->currency);
-                if ($currencyObj && isset($currencyObj->name)) {
+                if ($currencyObj && !empty($currencyObj->name)) {
                     $currencyName = $currencyObj->name;
                 }
+            } elseif (!empty($invoice->id) && function_exists('get_invoice_currency_id')) {
+                $currencyId = get_invoice_currency_id($invoice->id);
+                if ($currencyId && function_exists('get_currency')) {
+                    $currencyObj = get_currency($currencyId);
+                    if ($currencyObj && !empty($currencyObj->name)) {
+                        $currencyName = $currencyObj->name;
+                    }
+                }
             }
-        } elseif (isset($invoice->id) && function_exists('get_invoice_currency_id')) {
-            $currencyId = get_invoice_currency_id($invoice->id);
-            if ($currencyId && function_exists('get_currency')) {
-                $currencyObj = get_currency($currencyId);
-                if ($currencyObj && isset($currencyObj->name)) {
+        } elseif (is_array($invoice)) {
+            $currencyName = $invoice['currency_name'] ?? '';
+            if (empty($currencyName) && !empty($invoice['currency']) && function_exists('get_currency')) {
+                $currencyObj = get_currency($invoice['currency']);
+                if ($currencyObj && !empty($currencyObj->name)) {
                     $currencyName = $currencyObj->name;
                 }
             }
         }
 
-        if (empty($currencyName) && function_exists('get_base_currency')) {
-            $baseCurr = get_base_currency();
-            if ($baseCurr && isset($baseCurr->name)) {
-                $currencyName = $baseCurr->name;
-            }
-        }
-
-        // Se a moeda identificada não for BRL, oculta o gateway
+        // Se a fatura tiver uma moeda identificada e NÃO for BRL, oculta o gateway na fatura
         if (!empty($currencyName) && strtoupper(trim($currencyName)) !== 'BRL') {
             return false;
         }
 
-        // Para Boleto: Oculta automaticamente caso não haja credenciais da API Cora Pro configuradas
+        // Para Boleto na Fatura: Oculta automaticamente caso não haja credenciais da API Cora Pro configuradas
         if ($gatewayId === 'cora_boleto') {
             $CI = &get_instance();
+            $moduleName = defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : 'cora_payments';
             if (!class_exists('Cora_api', false)) {
-                $CI->load->library('cora_payments/cora_api');
+                $CI->load->library($moduleName . '/cora_api');
             }
             if (isset($CI->cora_api)) {
                 $clientId = $CI->cora_api->get_credential('client_id', 'cora_boleto');

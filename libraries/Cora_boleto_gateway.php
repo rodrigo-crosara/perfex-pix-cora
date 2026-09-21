@@ -25,7 +25,8 @@ class Cora_boleto_gateway extends App_gateway
         $this->setName('Boleto Bancário Cora (com Pix)');
 
         // Carrega a biblioteca central compartilhada
-        $this->ci->load->library('cora_payments/cora_api');
+        $moduleName = defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : 'cora_payments';
+        $this->ci->load->library($moduleName . '/cora_api');
         $this->cora_api = $this->ci->cora_api;
 
         $webhookUrl = site_url('gateways/cora/webhook');
@@ -129,45 +130,6 @@ class Cora_boleto_gateway extends App_gateway
                 'info'             => '<p class="text-info"><i class="fa fa-info-circle"></i> URL utilizada para conciliação automática de boletos e Pix.</p>',
             ],
         ]);
-    }
-
-    /**
-     * Verifica disponibilidade do gateway Boleto para uma fatura específica
-     *
-     * @param array|object|null $invoice
-     * @return bool
-     */
-    public function is_available($invoice = null)
-    {
-        if (!empty($invoice)) {
-            $currency = '';
-            if (is_object($invoice)) {
-                $currency = $invoice->currency_name ?? '';
-                if (empty($currency) && isset($invoice->currency) && function_exists('get_currency')) {
-                    $c = get_currency($invoice->currency);
-                    $currency = $c->name ?? '';
-                }
-            } elseif (is_array($invoice)) {
-                $currency = $invoice['currency_name'] ?? '';
-            }
-
-            if (!empty($currency) && strtoupper(trim($currency)) !== 'BRL') {
-                return false;
-            }
-        }
-
-        // Boleto exige credenciais ativas da API Cora Pro com mTLS
-        $clientId = trim((string)$this->cora_api->get_credential('client_id', 'cora_boleto'));
-        $certRaw  = trim((string)$this->cora_api->get_credential('cert_content', 'cora_boleto'));
-        $keyRaw   = trim((string)$this->cora_api->get_credential('key_content', 'cora_boleto'));
-        $certsDir = $this->cora_api->get_certs_dir();
-        $hasCertFiles = (file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem') && file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_key.key'));
-
-        if (empty($clientId) || (empty($certRaw) && !$hasCertFiles) || (empty($keyRaw) && !$hasCertFiles)) {
-            return false;
-        }
-
-        return parent::is_available($invoice);
     }
 
     /**

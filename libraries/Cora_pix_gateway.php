@@ -27,11 +27,12 @@ class Cora_pix_gateway extends App_gateway
         $this->setName('Pix Banco Cora');
 
         // Carrega a biblioteca central compartilhada
-        $this->ci->load->library('cora_payments/cora_api');
+        $moduleName = defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : 'cora_payments';
+        $this->ci->load->library($moduleName . '/cora_api');
         $this->cora_api = $this->ci->cora_api;
 
         // Carrega o helper de payload Pix EMVCo
-        $this->ci->load->library('cora_payments/pix_payload');
+        $this->ci->load->library($moduleName . '/pix_payload');
 
         // URL do Webhook oficial (Liberado nativamente de CSRF pelo Perfex)
         $webhookUrl = site_url('gateways/cora/webhook');
@@ -180,34 +181,6 @@ class Cora_pix_gateway extends App_gateway
                 'info'             => '<p class="text-info"><i class="fa fa-info-circle"></i> Cadastre esta URL no portal Cora Developers para conciliação automática via API.</p>',
             ],
         ]);
-    }
-
-    /**
-     * Verifica disponibilidade do gateway para uma fatura específica
-     *
-     * @param array|object|null $invoice
-     * @return bool
-     */
-    public function is_available($invoice = null)
-    {
-        if (!empty($invoice)) {
-            $currency = '';
-            if (is_object($invoice)) {
-                $currency = $invoice->currency_name ?? '';
-                if (empty($currency) && isset($invoice->currency) && function_exists('get_currency')) {
-                    $c = get_currency($invoice->currency);
-                    $currency = $c->name ?? '';
-                }
-            } elseif (is_array($invoice)) {
-                $currency = $invoice['currency_name'] ?? '';
-            }
-
-            if (!empty($currency) && strtoupper(trim($currency)) !== 'BRL') {
-                return false;
-            }
-        }
-
-        return parent::is_available($invoice);
     }
 
     /**
