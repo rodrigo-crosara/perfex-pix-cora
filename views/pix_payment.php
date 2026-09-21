@@ -355,7 +355,7 @@ $isManual = !empty($is_manual);
                 ?>
                 <div style="margin-bottom: 22px;">
                     <?php if (!empty($cleanWa)): ?>
-                        <a href="https://api.whatsapp.com/send?phone=<?= $cleanWa; ?>&text=<?= $waText; ?>" target="_blank" class="btn btn-whatsapp" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; font-weight: 600; font-size: 15px; padding: 12px 20px; border-radius: 8px; text-decoration: none; margin-bottom: 10px;">
+                        <a href="https://api.whatsapp.com/send?phone=<?= html_escape($cleanWa); ?>&amp;text=<?= html_escape($waText); ?>" target="_blank" class="btn btn-whatsapp" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; font-weight: 600; font-size: 15px; padding: 12px 20px; border-radius: 8px; text-decoration: none; margin-bottom: 10px;">
                             <i class="fab fa-whatsapp" style="font-size: 18px;"></i> Enviar Comprovante pelo WhatsApp
                         </a>
                     <?php endif; ?>
@@ -365,7 +365,7 @@ $isManual = !empty($is_manual);
                         $mailSubject = rawurlencode("Comprovante de Pagamento - Fatura #{$invoiceNum}");
                         $mailBody    = rawurlencode("Olá,\n\nSegue anexo o comprovante de pagamento via Pix referente à Fatura #{$invoiceNum} no valor de R$ {$valorFormatado}.\n\nObrigado!");
                         ?>
-                        <a href="mailto:<?= html_escape($company_email); ?>?subject=<?= $mailSubject; ?>&body=<?= $mailBody; ?>" class="btn btn-email-action" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; font-weight: 600; font-size: 14px; padding: 10px 20px; border-radius: 8px; text-decoration: none;">
+                        <a href="mailto:<?= html_escape($company_email); ?>?subject=<?= html_escape($mailSubject); ?>&amp;body=<?= html_escape($mailBody); ?>" class="btn btn-email-action" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; font-weight: 600; font-size: 14px; padding: 10px 20px; border-radius: 8px; text-decoration: none;">
                             <i class="fas fa-envelope"></i> Enviar Comprovante por E-mail
                         </a>
                     <?php endif; ?>
@@ -412,7 +412,12 @@ $isManual = !empty($is_manual);
 </div>
 
 <!-- Scripts de Suporte -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<?php
+$qrcodeJsUrl = function_exists('module_dir_url')
+    ? module_dir_url(defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : 'cora_payments', 'assets/js/qrcode.min.js')
+    : base_url('modules/' . (defined('CORA_PAYMENTS_MODULE_NAME') ? CORA_PAYMENTS_MODULE_NAME : 'cora_payments') . '/assets/js/qrcode.min.js');
+?>
+<script src="<?= html_escape($qrcodeJsUrl); ?>"></script>
 <script>
     document.addEventListener("DOMContentLoaded", function() {
         var pixPayload = <?= json_encode($pix_copia_cola); ?>;

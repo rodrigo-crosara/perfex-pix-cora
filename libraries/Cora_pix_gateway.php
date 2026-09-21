@@ -183,6 +183,34 @@ class Cora_pix_gateway extends App_gateway
     }
 
     /**
+     * Verifica disponibilidade do gateway para uma fatura específica
+     *
+     * @param array|object|null $invoice
+     * @return bool
+     */
+    public function is_available($invoice = null)
+    {
+        if (!empty($invoice)) {
+            $currency = '';
+            if (is_object($invoice)) {
+                $currency = $invoice->currency_name ?? '';
+                if (empty($currency) && isset($invoice->currency) && function_exists('get_currency')) {
+                    $c = get_currency($invoice->currency);
+                    $currency = $c->name ?? '';
+                }
+            } elseif (is_array($invoice)) {
+                $currency = $invoice['currency_name'] ?? '';
+            }
+
+            if (!empty($currency) && strtoupper(trim($currency)) !== 'BRL') {
+                return false;
+            }
+        }
+
+        return parent::is_available($invoice);
+    }
+
+    /**
      * Processa o pagamento iniciado pelo cliente no Perfex CRM
      *
      * @param array $data Dados com fatura e valor
@@ -201,8 +229,22 @@ class Cora_pix_gateway extends App_gateway
         }
 
         // Validação de Moeda: Apenas BRL é permitido
-        $currency = isset($invoice->currency_name) ? $invoice->currency_name : 'BRL';
-        if (strtoupper(trim($currency)) !== 'BRL') {
+        $currency = '';
+        if (isset($invoice->currency_name) && !empty($invoice->currency_name)) {
+            $currency = $invoice->currency_name;
+        } elseif (isset($invoice->currency) && function_exists('get_currency')) {
+            $c = get_currency($invoice->currency);
+            if ($c && isset($c->name)) {
+                $currency = $c->name;
+            }
+        }
+        if (empty($currency) && function_exists('get_base_currency')) {
+            $bc = get_base_currency();
+            if ($bc && isset($bc->name)) {
+                $currency = $bc->name;
+            }
+        }
+        if (strtoupper(trim($currency ?: 'BRL')) !== 'BRL') {
             set_alert('warning', 'O Pix está disponível apenas para faturas emitidas em Reais (BRL).');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;

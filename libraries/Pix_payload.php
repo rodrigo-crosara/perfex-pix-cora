@@ -10,7 +10,8 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * 
  * Funcionalidades:
  * - Montagem de elementos TLV (Tag-Length-Value) no padrão oficial EMVCo.
- * - Sanitização rigorosa de caracteres (remoção de acentos e símbolos não permitidos).
+ * - Sanitização rigorosa de caracteres (remoção de acentos e símbolos não permitidos), 100% compatível com PHP 8.1, 8.2, 8.3 e 8.4 (sem uso de utf8_encode).
+ * - Truncamento estrito nos limites de tamanho do Bacen (Nome máx 25, Cidade máx 15, TxID máx 25).
  * - Formatação e validação de chaves Pix (CPF, CNPJ, Telefone com DDI +55, E-mail e Chave Aleatória).
  * - Cálculo do checksum CRC16-CCITT-FALSE (polinômio 0x1021, init 0xFFFF).
  * - Suporte nativo à renderização visual de QR Code em SVG sem dependências externas pesadas.
@@ -48,7 +49,8 @@ class Pix_payload
     }
 
     /**
-     * Remove acentos e caracteres não-ASCII de forma compatível com PHP 8.1/8.2
+     * Remove acentos e caracteres não-ASCII de forma 100% compatível com PHP 8.2+
+     * Não utiliza utf8_encode() ou utf8_decode() (descontinuadas no PHP 8.2 e removidas no PHP 8.4).
      *
      * @param string $string
      * @return string
@@ -68,13 +70,24 @@ class Pix_payload
             'Ó'=>'O', 'Ò'=>'O', 'Õ'=>'O', 'Ô'=>'O', 'Ö'=>'O',
             'Ú'=>'U', 'Ù'=>'U', 'Û'=>'U', 'Ü'=>'U',
             'Ç'=>'C', 'Ñ'=>'N',
+            'º'=>'', 'ª'=>'', '°'=>'', '§'=>'',
         ];
-        return strtr((string)$string, $map);
+        $clean = strtr((string)$string, $map);
+
+        if (function_exists('iconv')) {
+            $trans = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $clean);
+            if ($trans !== false) {
+                $clean = $trans;
+            }
+        }
+
+        return $clean;
     }
 
     /**
      * Sanitiza texto para os campos Merchant Name (máx 25) e Merchant City (máx 15)
      * Mantém apenas letras maiúsculas, números e espaços simples.
+     * Trunca rigorosamente de acordo com os limites do Bacen para evitar rejeição no app do banco.
      *
      * @param string $text
      * @param int $maxLength
@@ -90,6 +103,12 @@ class Pix_payload
 
         if (empty($clean)) {
             $clean = $fallback;
+        }
+
+        if (function_exists('mb_substr')) {
+            $clean = mb_substr($clean, 0, $maxLength, 'UTF-8');
+        } else {
+            $clean = substr($clean, 0, $maxLength);
         }
 
         return substr($clean, 0, $maxLength);
@@ -146,6 +165,11 @@ class Pix_payload
         if (empty($clean)) {
             return '***';
         }
+
+        if (function_exists('mb_substr')) {
+            $clean = mb_substr($clean, 0, 25, 'UTF-8');
+        }
+
         return substr($clean, 0, 25);
     }
 

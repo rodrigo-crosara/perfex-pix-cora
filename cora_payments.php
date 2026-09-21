@@ -101,12 +101,18 @@ function cora_payments_csrf_exclude($uris)
 }
 
 /**
- * Validação de Moeda: Oculta os gateways Cora para faturas que não sejam em Real (BRL)
+ * Validação de Moeda e Disponibilidade do Gateway:
+ * - Oculta Pix e Boleto Cora para faturas que não sejam em Real (BRL).
+ * - Oculta Boleto Cora caso as credenciais da API Cora Pro (mTLS) não estejam configuradas.
  */
 hooks()->add_filter('is_payment_gateway_available', 'cora_payments_check_currency_available', 10, 3);
 
 function cora_payments_check_currency_available($available, $gateway, $invoice)
 {
+    if ($available === false) {
+        return false;
+    }
+
     $gatewayId = is_array($gateway) ? ($gateway['id'] ?? '') : ($gateway->id ?? '');
 
     if ($gatewayId === 'cora_pix' || $gatewayId === 'cora_boleto') {
@@ -114,14 +120,51 @@ function cora_payments_check_currency_available($available, $gateway, $invoice)
         if (isset($invoice->currency_name) && !empty($invoice->currency_name)) {
             $currencyName = $invoice->currency_name;
         } elseif (isset($invoice->currency)) {
-            $currencyObj = get_currency($invoice->currency);
-            if ($currencyObj && isset($currencyObj->name)) {
-                $currencyName = $currencyObj->name;
+            if (function_exists('get_currency')) {
+                $currencyObj = get_currency($invoice->currency);
+                if ($currencyObj && isset($currencyObj->name)) {
+                    $currencyName = $currencyObj->name;
+                }
+            }
+        } elseif (isset($invoice->id) && function_exists('get_invoice_currency_id')) {
+            $currencyId = get_invoice_currency_id($invoice->id);
+            if ($currencyId && function_exists('get_currency')) {
+                $currencyObj = get_currency($currencyId);
+                if ($currencyObj && isset($currencyObj->name)) {
+                    $currencyName = $currencyObj->name;
+                }
             }
         }
 
+        if (empty($currencyName) && function_exists('get_base_currency')) {
+            $baseCurr = get_base_currency();
+            if ($baseCurr && isset($baseCurr->name)) {
+                $currencyName = $baseCurr->name;
+            }
+        }
+
+        // Se a moeda identificada não for BRL, oculta o gateway
         if (!empty($currencyName) && strtoupper(trim($currencyName)) !== 'BRL') {
             return false;
+        }
+
+        // Para Boleto: Oculta automaticamente caso não haja credenciais da API Cora Pro configuradas
+        if ($gatewayId === 'cora_boleto') {
+            $CI = &get_instance();
+            if (!class_exists('Cora_api', false)) {
+                $CI->load->library('cora_payments/cora_api');
+            }
+            if (isset($CI->cora_api)) {
+                $clientId = $CI->cora_api->get_credential('client_id', 'cora_boleto');
+                $certRaw  = $CI->cora_api->get_credential('cert_content', 'cora_boleto');
+                $keyRaw   = $CI->cora_api->get_credential('key_content', 'cora_boleto');
+                $certsDir = $CI->cora_api->get_certs_dir();
+                $hasFiles = (file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem') && file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_key.key'));
+
+                if (empty($clientId) || (empty($certRaw) && !$hasFiles) || (empty($keyRaw) && !$hasFiles)) {
+                    return false;
+                }
+            }
         }
     }
 
@@ -180,8 +223,11 @@ function cora_payments_render_admin_ui()
 
         if (boletoTab) {
             var boletoNotice = `
-            <div class="alert alert-info mbot20">
+            <div class="alert alert-info mbot15">
                 <i class="fa fa-sync-alt"></i> <strong>Credenciais Compartilhadas:</strong> Se você já preencheu o Client ID e os certificados na aba <strong>Pix Banco Cora</strong>, não é necessário preenchê-los novamente aqui. O módulo reutiliza automaticamente as credenciais já configuradas!
+            </div>
+            <div class="alert alert-warning mbot20">
+                <i class="fa fa-shield-alt"></i> <strong>Atenção:</strong> O Boleto Bancário Híbrido requer obrigatoriamente a emissão via API Cora Pro com certificados mTLS ativos. Caso sua empresa utilize o <em>Modo Pix Manual</em> sem o plano Pro, a opção de Boleto será mantida oculta automaticamente para os clientes na fatura para prevenir falhas de emissão.
             </div>
             `;
             boletoTab.insertAdjacentHTML('afterbegin', boletoNotice);

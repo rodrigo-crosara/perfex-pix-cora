@@ -132,6 +132,45 @@ class Cora_boleto_gateway extends App_gateway
     }
 
     /**
+     * Verifica disponibilidade do gateway Boleto para uma fatura específica
+     *
+     * @param array|object|null $invoice
+     * @return bool
+     */
+    public function is_available($invoice = null)
+    {
+        if (!empty($invoice)) {
+            $currency = '';
+            if (is_object($invoice)) {
+                $currency = $invoice->currency_name ?? '';
+                if (empty($currency) && isset($invoice->currency) && function_exists('get_currency')) {
+                    $c = get_currency($invoice->currency);
+                    $currency = $c->name ?? '';
+                }
+            } elseif (is_array($invoice)) {
+                $currency = $invoice['currency_name'] ?? '';
+            }
+
+            if (!empty($currency) && strtoupper(trim($currency)) !== 'BRL') {
+                return false;
+            }
+        }
+
+        // Boleto exige credenciais ativas da API Cora Pro com mTLS
+        $clientId = trim((string)$this->cora_api->get_credential('client_id', 'cora_boleto'));
+        $certRaw  = trim((string)$this->cora_api->get_credential('cert_content', 'cora_boleto'));
+        $keyRaw   = trim((string)$this->cora_api->get_credential('key_content', 'cora_boleto'));
+        $certsDir = $this->cora_api->get_certs_dir();
+        $hasCertFiles = (file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem') && file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_key.key'));
+
+        if (empty($clientId) || (empty($certRaw) && !$hasCertFiles) || (empty($keyRaw) && !$hasCertFiles)) {
+            return false;
+        }
+
+        return parent::is_available($invoice);
+    }
+
+    /**
      * Processa o pagamento via Boleto Bancário Híbrido
      *
      * @param array $data Dados contendo 'invoice', 'amount'
@@ -150,8 +189,22 @@ class Cora_boleto_gateway extends App_gateway
         }
 
         // 1. Validação de Moeda: Apenas BRL é suportado
-        $currency = isset($invoice->currency_name) ? $invoice->currency_name : 'BRL';
-        if (strtoupper(trim($currency)) !== 'BRL') {
+        $currency = '';
+        if (isset($invoice->currency_name) && !empty($invoice->currency_name)) {
+            $currency = $invoice->currency_name;
+        } elseif (isset($invoice->currency) && function_exists('get_currency')) {
+            $c = get_currency($invoice->currency);
+            if ($c && isset($c->name)) {
+                $currency = $c->name;
+            }
+        }
+        if (empty($currency) && function_exists('get_base_currency')) {
+            $bc = get_base_currency();
+            if ($bc && isset($bc->name)) {
+                $currency = $bc->name;
+            }
+        }
+        if (strtoupper(trim($currency ?: 'BRL')) !== 'BRL') {
             set_alert('warning', 'O Boleto Bancário Cora está disponível apenas para faturas emitidas em Reais (BRL).');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;

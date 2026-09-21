@@ -476,6 +476,21 @@ class Cora extends App_Controller
             }
         }
 
+        // Validação opcional de Token de Webhook (se configurado)
+        $configuredToken = get_option('cora_payments_webhook_token') ?: get_option('payment_gateway_cora_pix_webhook_token');
+        if (!empty($configuredToken)) {
+            $incomingToken = $this->input->get_request_header('X-Webhook-Token', TRUE) 
+                ?: ($this->input->get_request_header('token', TRUE) 
+                ?: $this->input->get('token'));
+            if ($incomingToken !== $configuredToken) {
+                log_activity('Cora Webhook: Token de autenticação inválido ou ausente.');
+                set_status_header(401);
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['status' => 'error', 'message' => 'Unauthorized webhook']);
+                return;
+            }
+        }
+
         log_activity('Cora Payments Webhook recebido: ' . substr($rawInput ?: json_encode($payload), 0, 300));
 
         // =========================================================================
@@ -563,6 +578,14 @@ class Cora extends App_Controller
      */
     protected function process_pix_payment($txid, $valor = null, $e2eid = null)
     {
+        // 0. Proteção Anti-Fraude Modo Pix Manual:
+        // Transações de Modo Manual possuem TxID gerado com prefixo 'FAT' (ex: FAT123abcd...)
+        // e não possuem registro de cobrança imediata na API Cora. Elas NUNCA devem ser liquidadas via Webhook!
+        if (strpos($txid, 'FAT') === 0) {
+            log_activity('Segurança Cora Pix: Tentativa rejeitada de liquidação via webhook de transação Pix Manual (TxID: ' . $txid . '). Transações manuais exigem conferência e baixa manual no CRM.');
+            return false;
+        }
+
         // 1. Localiza a transação local mais recente
         $transacao = $this->db->where('txid', $txid)
                               ->order_by('id', 'DESC')
@@ -571,6 +594,12 @@ class Cora extends App_Controller
 
         if (!$transacao) {
             log_activity('Webhook Pix Cora: Transação não localizada no banco para txid: ' . $txid);
+            return false;
+        }
+
+        // Se for transação Pix Manual cadastrada sem cora_invoice_id e com prefixo FAT, rejeita
+        if (empty($transacao->cora_invoice_id) && strpos($transacao->txid, 'FAT') === 0) {
+            log_activity('Segurança Cora Pix: Webhook rejeitado para transação local Pix Manual (ID: ' . $transacao->id . ', TxID: ' . $txid . ')');
             return false;
         }
 
