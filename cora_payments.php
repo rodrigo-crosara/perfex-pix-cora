@@ -4,8 +4,8 @@ defined('BASEPATH') or exit('No direct script access allowed');
 
 /*
 Module Name: Cora Payments (Pix Imediato e Boleto Híbrido)
-Description: Módulo unificado de pagamentos com Banco Cora para Perfex CRM. Suporta Pix Imediato dinâmico e Boleto Bancário Híbrido com QR Code Pix embutido, autenticação mTLS, régua de cobrança automática/WhatsApp e conciliação atômica via Webhook.
-Version: 2.0.0
+Description: Módulo unificado de pagamentos com Banco Cora para Perfex CRM. Suporta Pix Imediato dinâmico (API Cora Pro com mTLS e Webhook) e Modo Pix Manual de contingência (QR Code Estático sem API), além de Boleto Bancário Híbrido.
+Version: 2.1.0
 Requires at least: 2.3.*
 Author: Perfex CRM Integration Team
 */
@@ -147,18 +147,21 @@ function cora_payments_render_admin_ui()
         var guideHtml = `
         <div class="panel panel-info mbot20">
             <div class="panel-heading pointer" data-toggle="collapse" data-target="#cora-sop-guide-body" style="cursor: pointer;">
-                <i class="fa fa-book-open"></i> <strong>Guia Passo a Passo: Configuração do Banco Cora (Pix &amp; Boleto Híbrido)</strong>
+                <i class="fa fa-book-open"></i> <strong>Guia de Configuração: Banco Cora (Modo Manual vs API Cora Pro)</strong>
                 <span class="pull-right"><i class="fa fa-chevron-down"></i></span>
             </div>
             <div id="cora-sop-guide-body" class="panel-collapse collapse in">
                 <div class="panel-body">
+                    <div class="alert alert-success" style="margin-bottom: 15px;">
+                        <i class="fa fa-star"></i> <strong>Novo Modo Pix Manual (Sem API Cora):</strong> Não possui o plano Cora Pro? Não se preocupe! Selecione <strong>"Modo Pix Manual"</strong> no campo <em>Modo de Operação do Pix</em> abaixo. Você precisará apenas informar sua Chave Pix e Nome do Titular. O sistema gerará o QR Code com o valor exato da fatura e sua equipe fará a baixa manual após receber o comprovante. Certificados mTLS e Client ID não são necessários!
+                    </div>
                     <ol class="padding-left-20" style="line-height: 1.8;">
-                        <li><strong>Plano Cora Pro:</strong> No aplicativo Cora no celular, vá em <em>Integrações via APIs &gt; Integração Direta</em> e confirme a adesão para liberar chaves e certificados de API.</li>
+                        <li><strong>Modo Automático (API Cora Pro):</strong> No aplicativo Cora no celular, vá em <em>Integrações via APIs &gt; Integração Direta</em> e confirme a adesão para liberar chaves e certificados de API.</li>
                         <li><strong>Portal Desenvolvedor:</strong> Pelo navegador no computador, acesse <a href="https://app.cora.com.br" target="_blank" class="text-bold">app.cora.com.br</a> &gt; <em>Configurações &gt; Integrações via API</em>.</li>
                         <li><strong>Aplicação e Client ID:</strong> Crie uma aplicação (Ex: "Perfex CRM") e copie o <strong>Client ID</strong> gerado.</li>
                         <li><strong>Certificados mTLS:</strong> Baixe o certificado público (<code>.pem</code> ou <code>.crt</code>) e a chave privada (<code>.key</code>). <em>Atenção: Salve o arquivo .key de imediato, pois a Cora o exibe apenas uma vez.</em></li>
                         <li><strong>Compartilhamento Automático:</strong> Os certificados e o Client ID configurados na aba <strong>Pix Banco Cora</strong> são compartilhados automaticamente com a aba <strong>Boleto Bancário Cora</strong>! Você não precisa preencher duas vezes.</li>
-                        <li><strong>Cadastro dos Dois Webhooks na Cora:</strong><br>
+                        <li><strong>Cadastro dos Dois Webhooks na Cora (Modo Automático):</strong><br>
                             &bull; <strong>URL Oficial do Webhook:</strong> <code style="user-select: all; font-weight: bold; background: #eef2f5; padding: 2px 6px; border-radius: 4px;"><?= $webhookUrl; ?></code><br>
                             &bull; <em>Webhook Pix:</em> Vinculado à Chave Pix para conciliação das transferências instantâneas.<br>
                             &bull; <em>Webhook Boletos (v2):</em> No portal <a href="https://app.cora.com.br" target="_blank">app.cora.com.br</a> em <em>Integrações &gt; Webhooks</em>, cadastre a URL oficial acima com os eventos <strong>invoice.paid</strong> e <strong>invoice.cancelled</strong>.

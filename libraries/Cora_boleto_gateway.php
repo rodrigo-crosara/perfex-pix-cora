@@ -30,24 +30,28 @@ class Cora_boleto_gateway extends App_gateway
 
         $webhookUrl = site_url('gateways/cora/webhook');
 
-        // Diagnóstico dos certificados
-        $diag = $this->cora_api->diagnosticar_certificados('cora_boleto');
+        // Diagnóstico dos certificados (apenas se preenchidos)
+        $certRaw = $this->getSetting('cert_content') ?: $this->cora_api->get_setting('cert_content', 'cora_boleto');
+        $keyRaw  = $this->getSetting('key_content') ?: $this->cora_api->get_setting('key_content', 'cora_boleto');
 
         $certInfo = '<p class="text-muted">Cole o certificado (.pem ou .crt). <em>Se deixar em branco, o sistema utilizará automaticamente as credenciais configuradas na aba Pix Banco Cora.</em></p>';
-        if (!empty($this->getSetting('cert_content')) || !empty($this->cora_api->get_setting('cert_content', 'cora_boleto'))) {
-            if ($diag['cert_valido']) {
-                $certInfo .= '<div class="alert alert-success mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-check-circle"></i> <strong>' . html_escape($diag['cert_mensagem']) . '</strong></div>';
-            } else {
-                $certInfo .= '<div class="alert alert-danger mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-exclamation-triangle"></i> <strong>' . html_escape($diag['cert_mensagem']) . '</strong></div>';
-            }
-        }
+        $keyInfo  = '<p class="text-muted">Cole a chave privada (.key). <em>Se deixar em branco, o sistema utilizará a chave configurada na aba Pix Banco Cora.</em></p>';
 
-        $keyInfo = '<p class="text-muted">Cole a chave privada (.key). <em>Se deixar em branco, o sistema utilizará a chave configurada na aba Pix Banco Cora.</em></p>';
-        if (!empty($this->getSetting('key_content')) || !empty($this->cora_api->get_setting('key_content', 'cora_boleto'))) {
-            if ($diag['key_valida']) {
-                $keyInfo .= '<div class="alert alert-success mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-check-circle"></i> <strong>' . html_escape($diag['key_mensagem']) . '</strong></div>';
-            } else {
-                $keyInfo .= '<div class="alert alert-danger mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-exclamation-triangle"></i> <strong>' . html_escape($diag['key_mensagem']) . '</strong></div>';
+        if (!empty($certRaw) || !empty($keyRaw)) {
+            $diag = $this->cora_api->diagnosticar_certificados('cora_boleto');
+            if (!empty($certRaw)) {
+                if ($diag['cert_valido']) {
+                    $certInfo .= '<div class="alert alert-success mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-check-circle"></i> <strong>' . html_escape($diag['cert_mensagem']) . '</strong></div>';
+                } else {
+                    $certInfo .= '<div class="alert alert-danger mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-exclamation-triangle"></i> <strong>' . html_escape($diag['cert_mensagem']) . '</strong></div>';
+                }
+            }
+            if (!empty($keyRaw)) {
+                if ($diag['key_valida']) {
+                    $keyInfo .= '<div class="alert alert-success mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-check-circle"></i> <strong>' . html_escape($diag['key_mensagem']) . '</strong></div>';
+                } else {
+                    $keyInfo .= '<div class="alert alert-danger mtop10" style="margin-bottom:0; padding:8px 12px;"><i class="fa fa-exclamation-triangle"></i> <strong>' . html_escape($diag['key_mensagem']) . '</strong></div>';
+                }
             }
         }
 
@@ -157,6 +161,19 @@ class Cora_boleto_gateway extends App_gateway
         $doc = (string) preg_replace('/\D/', '', $invoice->client->vat ?? '');
         if (empty($doc) || (strlen($doc) !== 11 && strlen($doc) !== 14)) {
             set_alert('danger', 'O cadastro do cliente precisa conter um CPF (11 dígitos) ou CNPJ (14 dígitos) válido para emitir o Boleto Bancário.');
+            redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
+            return;
+        }
+
+        // 3. Validação de Credenciais mTLS da API Cora Pro (Boleto Bancário depende estritamente de registro bancário)
+        $clientId = trim((string)$this->cora_api->get_credential('client_id', 'cora_boleto'));
+        $certRaw  = trim((string)$this->cora_api->get_credential('cert_content', 'cora_boleto'));
+        $keyRaw   = trim((string)$this->cora_api->get_credential('key_content', 'cora_boleto'));
+        $certsDir = $this->cora_api->get_certs_dir();
+        $hasCertFiles = (file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_cert.pem') && file_exists($certsDir . DIRECTORY_SEPARATOR . 'cora_key.key'));
+
+        if (empty($clientId) || (empty($certRaw) && !$hasCertFiles) || (empty($keyRaw) && !$hasCertFiles)) {
+            set_alert('warning', 'A emissão de Boletos Bancários requer a integração ativa da API Cora Pro com certificados mTLS registrados. Caso sua empresa utilize o Modo Pix Manual, por favor selecione a opção Pix para efetuar o pagamento.');
             redirect(site_url('invoice/' . $invoice->id . '/' . $invoice->hash));
             return;
         }

@@ -1,11 +1,13 @@
-<?php defined('BASEPATH') or exit('No direct script access allowed'); ?>
+<?php defined('BASEPATH') or exit('No direct script access allowed'); 
+$isManual = !empty($is_manual);
+?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title><?= html_escape($title ?? 'Pagamento Pix - Banco Cora'); ?></title>
+    <title><?= html_escape($title ?? 'Pagamento Pix'); ?></title>
     
     <!-- Perfex CRM / Bootstrap Native Styling -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.4.1/css/bootstrap.min.css">
@@ -57,7 +59,7 @@
             border-radius: 12px;
             padding: 16px;
             text-align: center;
-            margin-bottom: 25px;
+            margin-bottom: 20px;
         }
         .pix-amount-title {
             font-size: 13px;
@@ -84,10 +86,11 @@
             width: 250px;
             height: 250px;
         }
-        #qrcode img, #qrcode canvas {
+        #qrcode img, #qrcode canvas, #qrcode svg {
             max-width: 100%;
             height: auto;
             margin: 0 auto;
+            display: block;
         }
         .copy-group {
             margin-bottom: 25px;
@@ -124,6 +127,27 @@
             border-color: #10b981 !important;
             color: #ffffff;
         }
+        .btn-whatsapp {
+            background-color: #25d366;
+            border-color: #25d366;
+            color: #ffffff;
+            transition: all 0.2s ease;
+        }
+        .btn-whatsapp:hover, .btn-whatsapp:focus {
+            background-color: #1ea952;
+            border-color: #1ea952;
+            color: #ffffff;
+        }
+        .btn-email-action {
+            background-color: #f8fafc;
+            border: 1px solid #cbd5e1;
+            color: #334155;
+            transition: all 0.2s ease;
+        }
+        .btn-email-action:hover, .btn-email-action:focus {
+            background-color: #e2e8f0;
+            color: #0f172a;
+        }
         .status-tracker {
             display: flex;
             align-items: center;
@@ -135,6 +159,12 @@
             font-size: 14px;
             font-weight: 500;
             margin-bottom: 20px;
+            text-align: center;
+        }
+        .status-tracker.manual-tracker {
+            background-color: #fffbeb;
+            color: #92400e;
+            border: 1px solid #fef3c7;
         }
         .pulse-dot {
             width: 10px;
@@ -142,7 +172,11 @@
             background-color: #3b82f6;
             border-radius: 50%;
             margin-right: 10px;
+            flex-shrink: 0;
             animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+        .pulse-dot.manual-dot {
+            background-color: #f59e0b;
         }
         @keyframes pulse-ring {
             0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
@@ -191,6 +225,31 @@
             color: #0f172a;
             text-decoration: underline;
         }
+        .beneficiary-card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 14px 18px;
+            margin-bottom: 20px;
+        }
+        .beneficiary-card .card-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .beneficiary-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+        .beneficiary-row:last-child {
+            margin-bottom: 0;
+        }
     </style>
 </head>
 <body>
@@ -198,16 +257,26 @@
 <div class="pix-container">
     <div class="pix-card">
         <div class="pix-header">
-            <h2><i class="fab fa-pix text-primary"></i> Pagamento via Pix Banco Cora</h2>
+            <h2>
+                <i class="fab fa-pix text-primary"></i> 
+                <?= $isManual ? 'Pagamento via Pix' : 'Pagamento via Pix Banco Cora'; ?>
+            </h2>
             <p>Fatura #<?= html_escape(format_invoice_number($invoice->id)); ?> &bull; <?= html_escape(get_option('companyname')); ?></p>
         </div>
 
         <div class="pix-body" id="payment-view">
-            <!-- Alerta de Status Dinâmico -->
-            <div class="status-tracker" id="status-indicator">
-                <div class="pulse-dot"></div>
-                <span>Aguardando confirmação do pagamento...</span>
-            </div>
+            <!-- Indicador de Status -->
+            <?php if ($isManual): ?>
+                <div class="status-tracker manual-tracker" id="status-indicator">
+                    <div class="pulse-dot manual-dot"></div>
+                    <span>Aguardando pagamento e envio do comprovante (Baixa manual)</span>
+                </div>
+            <?php else: ?>
+                <div class="status-tracker" id="status-indicator">
+                    <div class="pulse-dot"></div>
+                    <span>Aguardando confirmação do pagamento...</span>
+                </div>
+            <?php endif; ?>
 
             <!-- Resumo do Valor -->
             <div class="pix-amount-badge">
@@ -217,9 +286,34 @@
                 </div>
             </div>
 
+            <!-- Dados do Titular / Favorecido (No Modo Manual) -->
+            <?php if ($isManual && (!empty($merchant_name) || !empty($pix_key))): ?>
+                <div class="beneficiary-card">
+                    <div class="card-label">
+                        <i class="fas fa-university"></i> Dados da Conta de Destino
+                    </div>
+                    <?php if (!empty($merchant_name)): ?>
+                        <div class="beneficiary-row">
+                            <span class="text-muted">Titular:</span>
+                            <strong><?= html_escape($merchant_name); ?></strong>
+                        </div>
+                    <?php endif; ?>
+                    <?php if (!empty($pix_key)): ?>
+                        <div class="beneficiary-row">
+                            <span class="text-muted">Chave Pix (<?= strtoupper(html_escape($key_type ?? 'CHAVE')); ?>):</span>
+                            <strong style="user-select: all;"><?= html_escape($pix_key); ?></strong>
+                        </div>
+                    <?php endif; ?>
+                    <div class="beneficiary-row">
+                        <span class="text-muted">Identificador (TxID):</span>
+                        <code style="font-size: 12px;"><?= html_escape($txid); ?></code>
+                    </div>
+                </div>
+            <?php endif; ?>
+
             <!-- Box do QR Code -->
             <div class="qrcode-box">
-                <div id="qrcode"></div>
+                <div id="qrcode"><?= !empty($qr_code_svg) ? $qr_code_svg : ''; ?></div>
             </div>
 
             <!-- Campo Pix Copia e Cola -->
@@ -234,27 +328,76 @@
                 </button>
             </div>
 
-            <!-- Instruções -->
+            <!-- Seção de Contingência: Alerta e Ações de Comprovante no Modo Manual -->
+            <?php if ($isManual): ?>
+                <div class="alert alert-warning" style="border-radius: 10px; font-size: 13px; line-height: 1.6; border: 1px solid #fde68a; background-color: #fffbeb; color: #92400e; margin-bottom: 20px;">
+                    <i class="fas fa-exclamation-triangle"></i> <strong>Atenção:</strong> Este pagamento opera com <strong>baixa manual</strong>. Após transferir ou pagar pelo aplicativo do seu banco, favor enviar o comprovante com o número da sua fatura para que nossa equipe financeira realize a conciliação bancária e a quitação no sistema.
+                </div>
+
+                <?php if (!empty($instructions)): ?>
+                    <div class="instruction-steps" style="margin-top: 0; margin-bottom: 20px; border-left: 4px solid #0284c7;">
+                        <h4 style="color: #0f172a; margin-top: 0; margin-bottom: 8px;">
+                            <i class="fas fa-file-invoice text-info"></i> Instruções para Confirmação:
+                        </h4>
+                        <div style="font-size: 13px; color: #475569; line-height: 1.6; white-space: pre-line;"><?= html_escape($instructions); ?></div>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Botões de Contato Direto para Envio do Comprovante -->
+                <?php
+                $invoiceNum     = format_invoice_number($invoice->id);
+                $valorFormatado = number_format((float)$amount, 2, ',', '.');
+                $waText         = rawurlencode("Olá! Segue o comprovante de pagamento via Pix da Fatura #{$invoiceNum} no valor de R$ {$valorFormatado}.");
+                $cleanWa        = !empty($whatsapp) ? preg_replace('/\D/', '', $whatsapp) : '';
+                if (!empty($cleanWa) && strlen($cleanWa) >= 10 && strpos($cleanWa, '55') !== 0) {
+                    $cleanWa = '55' . $cleanWa;
+                }
+                ?>
+                <div style="margin-bottom: 22px;">
+                    <?php if (!empty($cleanWa)): ?>
+                        <a href="https://api.whatsapp.com/send?phone=<?= $cleanWa; ?>&text=<?= $waText; ?>" target="_blank" class="btn btn-whatsapp" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; font-weight: 600; font-size: 15px; padding: 12px 20px; border-radius: 8px; text-decoration: none; margin-bottom: 10px;">
+                            <i class="fab fa-whatsapp" style="font-size: 18px;"></i> Enviar Comprovante pelo WhatsApp
+                        </a>
+                    <?php endif; ?>
+
+                    <?php if (!empty($company_email)): ?>
+                        <?php 
+                        $mailSubject = rawurlencode("Comprovante de Pagamento - Fatura #{$invoiceNum}");
+                        $mailBody    = rawurlencode("Olá,\n\nSegue anexo o comprovante de pagamento via Pix referente à Fatura #{$invoiceNum} no valor de R$ {$valorFormatado}.\n\nObrigado!");
+                        ?>
+                        <a href="mailto:<?= html_escape($company_email); ?>?subject=<?= $mailSubject; ?>&body=<?= $mailBody; ?>" class="btn btn-email-action" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; font-weight: 600; font-size: 14px; padding: 10px 20px; border-radius: 8px; text-decoration: none;">
+                            <i class="fas fa-envelope"></i> Enviar Comprovante por E-mail
+                        </a>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+
+            <!-- Instruções Gerais de Pagamento -->
             <div class="instruction-steps">
                 <h4><i class="fas fa-info-circle text-info"></i> Como pagar pelo aplicativo do seu banco:</h4>
                 <ol>
-                    <li>Abra o aplicativo do seu banco de preferência.</li>
-                    <li>Selecione a opção <strong>Pix</strong> e clique em <strong>Pagar com QR Code</strong> ou <strong>Pix Copia e Cola</strong>.</li>
-                    <li>Escaneie a imagem do QR Code ou cole o código copiado.</li>
-                    <li>Confira o valor e os dados e confirme. A baixa nesta tela ocorrerá em instantes!</li>
+                    <li>Abra o aplicativo do seu banco de preferência no celular.</li>
+                    <li>Selecione a área <strong>Pix</strong> e clique em <strong>Pagar com QR Code</strong> ou <strong>Pix Copia e Cola</strong>.</li>
+                    <li>Escaneie a imagem do QR Code acima ou cole o código copiado.</li>
+                    <li>Confira o valor e o nome do favorecido e confirme o pagamento.</li>
+                    <?php if ($isManual): ?>
+                        <li>Salve o comprovante da transação e envie para nosso financeiro via WhatsApp ou E-mail acima.</li>
+                    <?php else: ?>
+                        <li>Aguarde alguns segundos nesta tela. A baixa ocorrerá automaticamente após a compensação!</li>
+                    <?php endif; ?>
                 </ol>
             </div>
         </div>
 
-        <!-- Tela de Sucesso após Liquidação via Webhook -->
+        <!-- Tela de Sucesso após Liquidação (Automática via Webhook ou Baixa Manual no CRM) -->
         <div class="success-overlay" id="success-view">
             <i class="fas fa-check-circle icon-success"></i>
             <h3 style="font-weight: 700; color: #0f172a; margin-top: 0;">Pagamento Confirmado!</h3>
             <p class="text-muted" style="font-size: 15px;">
-                Recebemos seu pagamento com sucesso. Redirecionando para a fatura liquidada...
+                Seu pagamento foi localizado e confirmado no sistema. Redirecionando para a fatura liquidada...
             </p>
             <div style="margin-top: 20px;">
-                <a href="<?= html_escape($invoice_url); ?>" class="btn btn-primary" style="border-radius: 8px; padding: 10px 24px;">
+                <a href="<?= html_escape($invoice_url); ?>" class="btn btn-primary" style="border-radius: 8px; padding: 10px 24px; font-weight: 600;">
                     Visualizar Fatura
                 </a>
             </div>
@@ -276,9 +419,9 @@
         var checkStatusUrl = <?= json_encode($check_status_url); ?>;
         var redirectUrl = <?= json_encode($invoice_url); ?>;
 
-        // 1. Renderiza o QR Code dinâmico
+        // 1. Renderiza o QR Code dinâmico caso não tenha SVG gerado no backend
         var qrcodeContainer = document.getElementById("qrcode");
-        if (typeof QRCode !== "undefined" && pixPayload) {
+        if (typeof QRCode !== "undefined" && pixPayload && (!qrcodeContainer.hasChildNodes() || qrcodeContainer.innerHTML.trim() === "")) {
             new QRCode(qrcodeContainer, {
                 text: pixPayload,
                 width: 220,
@@ -311,7 +454,6 @@
                         fallbackCopiar(texto);
                     });
             } else {
-                // Fallback para HTTP ou navegadores sem suporte direto à Clipboard API
                 fallbackCopiar(texto);
             }
         }
@@ -345,7 +487,7 @@
             copiarPix(pixPayload);
         });
 
-        // 3. Polling em segundo plano para detecção em tempo real do Webhook
+        // 3. Polling em segundo plano para detecção em tempo real (Webhook ou Baixa Manual no CRM)
         var pollingInterval = setInterval(function() {
             fetch(checkStatusUrl, {
                 method: 'GET',
@@ -369,7 +511,7 @@
                 }
             })
             .catch(function(error) {
-                // Silencia erros temporários de rede
+                // Silencia falhas temporárias de rede
             });
         }, 4000);
     });

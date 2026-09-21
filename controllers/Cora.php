@@ -141,6 +141,32 @@ class Cora extends App_Controller
             ? (float)$transaction->amount
             : (float)($invoice->total_left_to_pay ?? $invoice->total);
 
+        // Identifica o modo de operação configurado no gateway Pix
+        $this->load->library('cora_payments/cora_pix_gateway');
+        $operationMode = $this->cora_pix_gateway->getSetting('operation_mode') ?: 'api_cora';
+        $isManual      = ($operationMode === 'manual');
+
+        $merchantName = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_merchant_name'));
+        if (empty($merchantName)) {
+            $merchantName = get_option('companyname') ?: 'EMPRESA';
+        }
+
+        $pixKey = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_key'));
+        if (empty($pixKey)) {
+            $pixKey = trim((string)$this->cora_pix_gateway->getSetting('chave_pix'));
+        }
+
+        $keyType      = $this->cora_pix_gateway->getSetting('pix_manual_key_type') ?: 'cnpj';
+        $instructions = $this->cora_pix_gateway->getSetting('pix_manual_instructions');
+        $whatsapp     = trim((string)$this->cora_pix_gateway->getSetting('pix_manual_whatsapp'));
+        $companyEmail = get_option('invoice_company_email') ?: get_option('company_email');
+
+        // Tenta renderizar SVG nativo como fallback de alta fidelidade
+        if (!class_exists('Pix_payload', false)) {
+            $this->load->library('cora_payments/pix_payload');
+        }
+        $qrCodeSvg = Pix_payload::render_svg($transaction->pix_copia_cola, 6);
+
         $data = [
             'title'            => 'Pagamento Pix - Fatura #' . format_invoice_number($invoice->id),
             'invoice'          => $invoice,
@@ -150,6 +176,15 @@ class Cora extends App_Controller
             'amount'           => $amountToPay,
             'check_status_url' => site_url('cora_payments/cora/check_status/' . $invoice->id . '/' . $invoice->hash . '/' . $txid),
             'invoice_url'      => site_url('invoice/' . $invoice->id . '/' . $invoice->hash),
+            'is_manual'        => $isManual,
+            'merchant_name'    => $merchantName,
+            'merchant_city'    => $this->cora_pix_gateway->getSetting('pix_manual_merchant_city') ?: 'SAO PAULO',
+            'pix_key'          => $pixKey,
+            'key_type'         => $keyType,
+            'instructions'     => $instructions,
+            'whatsapp'         => $whatsapp,
+            'company_email'    => $companyEmail,
+            'qr_code_svg'      => $qrCodeSvg,
         ];
 
         $this->load->view('cora_payments/pix_payment', $data);
